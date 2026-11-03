@@ -20,6 +20,7 @@ namespace GameDev.RtsRpg
         [SerializeField] private Material cliffMaterial;
         [SerializeField] private Material rampMaterial;
         public TerrainSurface Surface { get; private set; }
+        public event Action SurfaceChanged;
         private Mesh ownedMesh;
 
         private void OnEnable() => Rebuild();
@@ -48,6 +49,7 @@ namespace GameDev.RtsRpg
                 ownedMesh = mesh;
                 GetComponent<MeshFilter>().sharedMesh = mesh;
                 Surface = surface;
+                SurfaceChanged?.Invoke();
             }
             catch (ArgumentException error)
             {
@@ -56,18 +58,18 @@ namespace GameDev.RtsRpg
         }
 
         [ContextMenu("Show Explicit 6x5")]
-        private void ShowExplicit() { source = Source.Explicit; Rebuild(); }
+        public void ShowExplicit() { source = Source.Explicit; Rebuild(); }
 
         [ContextMenu("Show Four Ramp Directions")]
-        private void ShowDirections() { source = Source.DirectionReview; Rebuild(); }
+        public void ShowDirections() { source = Source.DirectionReview; Rebuild(); }
 
         [ContextMenu("Show Procedural Seed 104729")]
-        private void ShowFirstSeed() { SetPreset(104729); }
+        private void ShowFirstSeed() { ShowProceduralSeed(104729); }
 
         [ContextMenu("Show Procedural Seed 130363")]
-        private void ShowSecondSeed() { SetPreset(130363); }
+        private void ShowSecondSeed() { ShowProceduralSeed(130363); }
 
-        private void SetPreset(int seed)
+        public void ShowProceduralSeed(int seed)
         {
             source = Source.Procedural;
             procedural = new ProceduralMapSettings { seed = seed };
@@ -76,7 +78,9 @@ namespace GameDev.RtsRpg
 
         private void Release()
         {
+            bool hadSurface = Surface != null;
             Surface = null;
+            if (hadSurface) SurfaceChanged?.Invoke();
             if (ownedMesh == null) return;
             var filter = GetComponent<MeshFilter>();
             if (filter.sharedMesh == ownedMesh) filter.sharedMesh = null;

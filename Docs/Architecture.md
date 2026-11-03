@@ -4,7 +4,7 @@
 
 ## 1. Baseline — опубликованная основа Unity
 
-Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); Stage 01 принят и объединён через PR #3; ниже фактическое состояние с принятым Stage 02 и текущей реализацией Stage 03, ожидающей ревью:
+Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); Stage 01 принят и объединён через PR #3; ниже фактическое состояние с принятым Stage 02 и объединённым кодом Stage 03 (визуальная приёмка открыта) и реализацией Stage 04 в отдельном PR:
 
 - Unity **6000.5.4f1**, Universal Render Pipeline **17.5.0**.
 - `Assets/Scenes/SampleScene.unity` — единственная активная сцена в `ProjectSettings/EditorBuildSettings.asset`. Stage 01 добавляет два реальных класса Camera/Input (см. раздел 7).
@@ -35,7 +35,7 @@
 | **01 Camera/Input** | RTS-камера, pan/zoom, преобразование cursor-to-world | Настройки и текущее состояние камеры | Unity Input System и сцена; **не** выделяет юнитов, не строит пути |
 | **02 Terrain Builder** | Геометрия блоков и высот, уступы/рампы, поверхность | Описание поверхности, высоты/рампы | Не знает про combat, UI, команды; единственный builder геометрии |
 | **03 Procedural Map** | Seed, разметка игровых зон и генерация данных карты | Структура карты, seed, параметры генерации | Использует Terrain Builder, без второго mesh builder |
-| **04 Navigation** | Проходимость, 4×4 сетка, A*, footprint, группа | Статические навданные + отдельно динамическая занятость | Читает terrain/препятствия; не передвигает Transform и не использует NavMesh |
+| **04 Navigation** | Проходимость, 4×4 сетка, A*, footprint, группа | Статические навданные; динамическая занятость только Stage 05 | Читает terrain/препятствия; не передвигает Transform и не использует NavMesh |
 | **05 Unit Movement** | Непрерывное движение, столкновения, уступание, stuck recovery | Положение, скорость/локальное движение/контакт юнита | Использует маршрут Navigation, не имеет собственного A* |
 | **06 RTS Controls** | Выделение и группы, Move/Attack-Move, отдача приказов | Выделение и активные приказы | Использует cursor-to-world, Navigation/Movement, не дублирует путь |
 | **07 Combat** | Цель, атаки, дальность, способности, AI, engagement slots | Состояние боя, тайминги и результаты атак | Использует движение/приказы/статы, не генерирует террейн |
@@ -85,13 +85,13 @@
 | `Assets/Scenes/SampleScene.unity` | Существующая ортографическая камера с controller и ссылками; свет/URP camera data/volume сохранены; один Terrain Builder с переключателем явной/контрольной/процедурной карты; временный Plane отключён, debug marker отключён через showCursorMarker | Ссылки на Input Actions, скрипт, preview materials; стартовая сцена в build settings сохранена |
 | `Assets/Camera/Preview/*` | Один простой URP unlit shader, два прежних материала; сохранён прежний opt-in `_SurfaceShading` (по умолчанию 0); террейн Stage 03 использует отдельный Terrain Surface shader | Нет C#-классов, генерации mesh, физических запросов или terrain-модели |
 | `Assets/Terrain/TerrainMapData.cs` (`TerrainMapData`, `TerrainRamp`, `TerrainDirection`) | ScriptableObject и статическая фабрика runtime-входа: размеры, уровни row-major, масштаб, рампы с cutIntoCliff; один CreateSurface валидирует оба входа и создаёт неизменяемый снимок | UnityEngine/System; не знает mesh, Input, Physics и навигацию |
-| `Assets/Terrain/TerrainSurface.cs` (`TerrainSurface`, вложенный `Cell`) | 4×4 области на блок, целочисленные четверти уровня в углах, номер/ориентация рампы, DetailSeed, профили граней и геометрически непроходимые границы | Только Unity math; читается Builder; будущая Navigation должна отдельно решать footprint/диагонали/занятость |
+| `Assets/Terrain/TerrainSurface.cs` (`TerrainSurface`, вложенный `Cell`) | 4×4 области на блок, целочисленные четверти уровня в углах, номер/ориентация рампы, DetailSeed, профили граней и геометрически непроходимые границы | Только Unity math; читается Builder и NavigationGrid; Grid отдельно решает footprint/диагонали/static blockers |
 | `Assets/Terrain/TerrainBuilder.cs` (`TerrainBuilder`) | Строит один mesh / три submesh из TerrainSurface, один верх на подячейку, гранёные стенки на разрывах и по периметру; владеет выбором источника и жизненным циклом mesh | TerrainMapData/Surface, MeshFilter/MeshRenderer; OnEnable или явный Rebuild; нет Update, collider, Physics и picking |
 | `Assets/Terrain/DemoTerrain.asset`, `TerrainPreview.mat` | Явная карта 6×5, уровни 0/1/2, рампы 1/4/3 подячейки с каменными плечами; URP grass material | Данные отделены от mesh; TerrainPreview GUID сохранён, материал переведён на Terrain Surface shader |
 | `Assets/Settings/*`, `Assets/TutorialInfo/*` | Исходные URP assets и поддержка Unity tutorial | Сохранены без изменений |
 | `Assets/Terrain/ProceduralTerrainGenerator.cs` | ProceduralMapSettings и статический генератор входных уровней/рамп: ключевые блоки → террасы → проходы → flood fill по геометрическим границам → ограниченная вариация → повторная проверка; локальный xorshift32 | Вызывает общую TerrainMapData.CreateSurface; не строит mesh, не меняет ScriptableObject и не выдаёт маршрутов |
 | `Assets/Terrain/TerrainSurface.shader`, `Cliff.mat`, `Ramp.mat`, `RampDirections.asset` | Три материала по типам геометрии; мировой 3D grain; явная контрольная карта N/E/S/W | Renderer получает ровно три слота; shader не определяет тип поверхности по высоте/уклону |
-| Units, navigation, combat и следующие Stage | **Не реализовано** | Не создавать потребителей заранее |
+| Units, movement, combat и следующие Stage | **Не реализовано** | Не создавать потребителей заранее |
 
 ### Stage 01: фактические правила
 
@@ -131,3 +131,22 @@
 - При пересечении границ сначала представить **минимальное архитектурное предложение** владельцу и обновить этот контракт после одобрения.
 - Не вводить автоматизированные Unit/Integration/PlayMode тесты, фикстуры и тестовую инфраструктуру до отдельного решения владельца.
 - При наличии Unity делать короткие проверки открытия сцены, компиляции и Play Mode. Если Unity недоступна, явно указывать **NOT RUN** и проводить доступную статическую проверку.
+
+### Stage 04: фактическая реализация Issue #7 (приёмка открыта)
+
+| Класс / путь `Assets/Navigation/` | Владелец данных и обязанность | Зависимости |
+|---|---|---|
+| `NavigationTypes.cs` | Footprint 1×1/1×2/2×2, pose, request, immutable path points/status, consumable expansion budget | Unity math; path хранит owner + revision для IsCurrent |
+| `NavigationGrid.cs` | Один Surface + снимок localToWorld; счётчики только статических blocker rectangles, handles, revision/event; геометрия, step/turn validity и world sampling | Читает `TerrainSurface.GetCell/GetEdge/IsBoundaryBlocked`; НЕ копирует heightmap и НЕ читает Mesh/Physics |
+| `NavigationPathfinder.cs` | Синхронный bounded 8-neighbour A*, heap, sparse query-local states; прямые шаги 10, диагонали 14, quarter-turn 10 | NavigationGrid, query/shared budget; не меняет Transform |
+| `NavigationGroupPlanner.cs` | Один guide spine, corridor ±2, bounded corridor-local paths с fallback, расширение зоны целей и временные footprint reservations | Grid + тот же Pathfinder; reservations только для конечных мест, не live occupancy |
+| `TerrainNavigation.cs` | Единственный navigation component одного Builder; владеет Grid lifetime, retire/rebuild и событием Changed | Builder.SurfaceChanged; LateUpdate лишь сравнивает matrix, перестраивает только при её изменении; маршруты не пересчитывает |
+| `NavigationDemo.cs` | Отключаемая диагностическая панель/линии в SampleScene; явные запросы, presets, blockers, отчёты | TerrainNavigation и существующий material (runtime copy); нет gameplay input/передвижения/юнитов |
+
+`TerrainBuilder` публикует `SurfaceChanged` после удаления старой поверхности и публикации новой; зависимости Terrain → Navigation нет. Его существующие переключатели явной/NESW/seed карты доступны demo. Camera/Input, shaders, shared assets и исходные GUID не изменены.
+
+В путях pose.Cell — нижний XZ угол занятого прямоугольника; world point — его центр на логической поверхности. Поворот 1×2 сохраняет anchor, меняет размеры и сдвигает центр на полклетки; проверяется консервативная область circumscribed discs, включая этот сдвиг. Нужна площадка 4×4: возможны ложные отказы в более тесном месте, но нет прохождения через стену. Это локальная дискретизация Stage 04, не анимация разворота. Между точками движение Stage 05 должно заново брать Y из Grid.WorldPoint и выполнять turn transition; сглаживания и скрытого движения нет.
+
+Допустимы translation/yaw, одинаковый положительный масштаб XZ и положительный Y. Tilt/shear/reflection, нечисловой transform и >262144 клеток отклоняются явно. Изменение карты/Transform создаёт новый Grid, старый Retire; handles/blockers привязаны к снимку и при новой карте регистрируются заново. Изменение только blockers обновляет лишь покрытый прямоугольник, revision инвалидирует все результаты. Нет глобального repath в Update.
+
+Stage 03 объединён через PR #8 (`60cb36f818889515498d2613d2a628fb421a1688`); подтверждение ручной визуальной/runtime-приёмки владельцем не получено. Stage 04 подготовлен по прямому запросу реализации, но эта зависимость остаётся открытой и не объявлена пройденной. Полный контракт, ограничения/complexity и ручные проверки: [Stage04Navigation.md](Stage04Navigation.md).

@@ -12,7 +12,7 @@ Read this file before changing any source or Unity scene. This repository is a U
 
 Before implementing anything, inspect the current repository and the real affected code. Never assume a future module already exists because it appears in the roadmap.
 
-## Current baseline (Stage 02 merged; Stage 03 pending review)
+## Current baseline (Stage 03 code merged; Stage 04 implementation pending review)
 
 - Unity **6000.5.4f1**, URP **17.5.0**.
 - The only scene is `Assets/Scenes/SampleScene.unity`.
@@ -41,4 +41,6 @@ Provide: changed systems and files; why those changes are within scope; dependen
 
 ## Scope reminder
 
-Stage 03 = readable terrain, seeded input generation, required-zone connectivity and the existing single builder. See Docs/Stage03ProceduralMap.md. No terrain picking, unit selection, A*, movement, combat, RPG, save systems or RTS base economy until their own stages.
+Current Issue #7: Stage 04 Navigation. TerrainNavigation/Grid/Pathfinder/GroupPlanner own static planning and invalidation, not movement. See Docs/Stage04Navigation.md. Stage 03 merged in PR #8; owner visual/runtime acceptance remains unconfirmed. No live unit occupancy, movement, selection, RTS commands or combat in Stage 04.
+
+Historical Stage 03 scope = readable terrain, seeded input generation, required-zone connectivity and the existing single builder. See Docs/Stage03ProceduralMap.md. No terrain picking, movement, unit selection, combat, RPG, saves or RTS base economy in Stage 04.
