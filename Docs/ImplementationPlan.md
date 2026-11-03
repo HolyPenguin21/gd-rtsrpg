@@ -29,15 +29,19 @@
 | **12 Reincarnation & Story** | Ранения, смерть, новая жизнь, world legacy, единый сюжет | Полная симуляция мира |
 | **13 Integration & Optimization** | Сценарии игры, интеграция и точечные оптимизации по измерениям | Преждевременный ECS-rewrite |
 
-## Stage 00.1 — текущий PR
+## Stage 00.1 — закрыт
 
-PR: https://github.com/HolyPenguin21/gd-rtsrpg/pull/1
+PR: https://github.com/HolyPenguin21/gd-rtsrpg/pull/1 — объединён, commit `38e28055d0ab9cf2968adebaa5d8e0fc7e736782`.
 
-Фактическая база: Unity **6000.5.4f1**, URP **17.5.0**; одна `Assets/Scenes/SampleScene.unity`; настройки URP, стандартные Input Actions и файлы учебного шаблона. Игровых модулей пока нет. Статический аудит сделан, но запуск Unity/Play Mode в среде менеджера не подтверждён.
+Фактическая база: Unity **6000.5.4f1**, URP **17.5.0**; одна `Assets/Scenes/SampleScene.unity`; настройки URP, стандартные Input Actions и файлы учебного шаблона. На момент Bootstrap игровых модулей не было; фактическая реализация Stage 01 описана ниже. Статический аудит сделан, но запуск Unity/Play Mode в среде менеджера не подтверждён.
 
 Условия закрытия Bootstrap: исходники, Packages и ProjectSettings опубликованы; добавлены GDD, Decisions, Architecture, ImplementationPlan, WorkingAgreement, AGENTS; проведён аудит PR, явно перечислены неисполненные проверки. Создавать новый проект вместо локального запрещено.
 
-## Stage 01 — проект первого функционального Issue
+## Stage 01 — реализован, ожидает ревью и приёмки
+
+Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/2
+
+В исходниках реализованы `RtsCameraController`, `CursorWorldProjection`, карта Camera в существующем Input Actions, интеграция с SampleScene и минимальная плоскость/маркер. Документация фактической архитектуры обновлена. Слияние только после менеджерской приёмки. Статическая проверка проведена; Unity import, C# / shader compilation и все Play Mode smoke checks — **NOT RUN**, редактор отсутствует. Детали: [Stage01Camera.md](Stage01Camera.md).
 
 **Цель:** можно перемещать и масштабировать ортографическую RTS-камеру, а игровая логика получает корректную точку курсора в мировых координатах для будущих команд.
 
