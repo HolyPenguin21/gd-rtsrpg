@@ -1,0 +1,18 @@
+* text=auto
+
+# Unity YAML merge
+*.unity merge=unityyamlmerge eol=lf
+*.prefab merge=unityyamlmerge eol=lf
+*.asset merge=unityyamlmerge eol=lf
+*.mat merge=unityyamlmerge eol=lf
+*.anim merge=unityyamlmerge eol=lf
+*.controller merge=unityyamlmerge eol=lf
+*.meta eol=lf
+
+# Binary
+*.png binary
+*.jpg binary
+*.fbx binary
+*.wav binary
+*.mp3 binary
+*.ogg binary
