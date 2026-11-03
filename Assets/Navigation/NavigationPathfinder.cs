@@ -16,7 +16,8 @@ namespace GameDev.RtsRpg
         public NavigationPath Find(NavigationRequest request, NavigationBudget budget = null) => Find(request, budget, null);
 
         // Group local pass can restrict the corridor; its fallback uses the same solver unrestricted.
-        internal NavigationPath Find(NavigationRequest request, NavigationBudget budget, HashSet<Vector2Int> corridor, bool restrictToCorridor = false)
+        internal NavigationPath Find(NavigationRequest request, NavigationBudget budget, HashSet<Vector2Int> corridor, bool restrictToCorridor = false,
+            Func<NavigationPose, NavigationPose, bool> allowsEdge = null)
         {
             NavigationPath Fail(NavigationStatus s, string reason) => new NavigationPath(grid, s, reason);
             if (!grid.IsAlive) return Fail(NavigationStatus.Stale, "Terrain snapshot was retired; rebuild navigation and replan explicitly.");
@@ -66,13 +67,15 @@ namespace GameDev.RtsRpg
                 foreach (var step in Steps)
                 {
                     var next = new NavigationPose(entry.Pose.Cell + step, entry.Pose.Facing);
-                    if ((!restrictToCorridor || corridor.Contains(next.Cell)) && grid.CanStep(entry.Pose, next, footprint)) Relax(next, step.x != 0 && step.y != 0 ? 14 : 10);
+                    if ((!restrictToCorridor || corridor.Contains(next.Cell)) && grid.CanStep(entry.Pose, next, footprint)
+                        && (allowsEdge == null || allowsEdge(entry.Pose, next))) Relax(next, step.x != 0 && step.y != 0 ? 14 : 10);
                 }
                 if (footprint.NeedsTurns)
                 for (int turn = -1; turn <= 1; turn += 2)
                 {
                     var next = new NavigationPose(entry.Pose.Cell, (TerrainDirection)(((int)entry.Pose.Facing + turn + 4) % 4));
-                    if (grid.CanTurn(entry.Pose, next, footprint)) Relax(next, 10);
+                    if (grid.CanTurn(entry.Pose, next, footprint)
+                        && (allowsEdge == null || allowsEdge(entry.Pose, next))) Relax(next, 10);
                 }
             }
             NavigationStatus status = found ? NavigationStatus.Success : exhausted ? NavigationStatus.BudgetExceeded : NavigationStatus.NoPath;

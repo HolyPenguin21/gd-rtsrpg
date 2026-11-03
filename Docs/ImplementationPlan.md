@@ -20,6 +20,7 @@
 | **03 Procedural Map** | Генерация ограниченной карты по seed: логика зон, рампы, связность, затем шум | Глобальная карта, армии и боевой AI |
 | **04 Navigation** | Сетка 4×4, footprint, A*, запрет срезания углов, гибридные маршруты и назначение мест | Непосредственное движение юнитов |
 | **05 Unit Movement** | Плавное мировое движение, столкновения, уступание, recovery от застревания | Combat |
+| **05.1 Traffic and Terrain** | Восстановление движения группы, геометрия уступов, Army (64) с Follow Mouse | RTS-команды и Combat |
 | **06 RTS Controls** | Выделение мышью и группы, Move/Attack-Move, приказы | Урон, прокачка |
 | **07 Combat** | Автоатаки, позиции ближнего боя, дальность/визуальные снаряды, способности и AI | Полная RPG-прогрессия |
 | **08 RPG Progression** | Классы, опыт, рост бойцов, характеристики героя, шесть слотов экипировки, Leadership | Сюжет/реинкарнация |
@@ -81,9 +82,13 @@ Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/6
 
 [Issue #7](https://github.com/HolyPenguin21/gd-rtsrpg/issues/7) объединён через PR #10, commit `68662ec5717febcb31bcdf4674ee5178a92efd39`. Контракт статической навигации и ручные сценарии описаны в [Stage04Navigation.md](Stage04Navigation.md).
 
-## Stage 05 — реализация в отдельной ветке
+## Stage 05 — объединён
 
-[Issue #9](https://github.com/HolyPenguin21/gd-rtsrpg/issues/9) включает читаемые рампы, крупную карту с природными формами, интеграцию со Stage 04 и исполнение маршрутов. Описание и состояние проверок в [Stage05Movement.md](Stage05Movement.md). Следующий этап — Stage 06 RTS Controls.
+[Issue #9](https://github.com/HolyPenguin21/gd-rtsrpg/issues/9) включает читаемые рампы, крупную карту с природными формами, интеграцию со Stage 04 и исполнение маршрутов. Описание и состояние проверок в [Stage05Movement.md](Stage05Movement.md). Код объединён через PR #11.
+
+## Stage 05.1 — на ревью
+
+[Issue #12](https://github.com/HolyPenguin21/gd-rtsrpg/issues/12) закрывает обнаруженные заторы, дорабатывает меш уступов и добавляет Follow Mouse в Army (64). Перед началом Stage 06 требуется приёмка по сценариям [Stage05Movement.md](Stage05Movement.md).
 
 ## Проверка
 
