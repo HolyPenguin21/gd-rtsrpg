@@ -447,12 +447,12 @@ MonoBehaviour:
     y: -25
     width: 50
     height: 50
-  tilt: 45
+  tilt: 55
   cameraHeight: 25
   planeHeight: 0
   minZoom: 4
   maxZoom: 24
-  initialZoom: 12
+  initialZoom: 15
   zoomSpeed: 0.02
   zoomSmoothTime: 0.12
   showCursorMarker: 0
@@ -649,7 +649,7 @@ GameObject:
   - component: {fileID: 1003003}
   - component: {fileID: 1003004}
   m_Layer: 0
-  m_Name: Stage 02 Terrain (explicit map)
+  m_Name: Terrain (explicit or seeded)
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -704,6 +704,8 @@ MeshRenderer:
   m_RendererPriority: 0
   m_Materials:
   - {fileID: 2100000, guid: c8ca77e4f3374e69a48e40f5ff6a1e08, type: 2}
+  - {fileID: 2100000, guid: d778c5652d7b4dfc8f16d1e24981fafa, type: 2}
+  - {fileID: 2100000, guid: 2dd15b4dfb05432b8b75946fbf8aa8c2, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -738,7 +740,26 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1402eee06f7e4ba2832b735bae3dbe13, type: 3}
   m_Name:
   m_EditorClassIdentifier:
+  source: 0
+  directionReviewMap: {fileID: 11400000, guid: 9e5abc22c03e46dc8e553e392afa4ac0, type: 2}
+  procedural:
+    seed: 104729
+    width: 10
+    length: 10
+    blockWorldSize: 4
+    heightStepWorld: 2
+    uphill: 0
+    terraceCount: 2
+    rampsPerTerrace: 1
+    rampWidth: 4
+    edgeVariation: 0.65
+    startZone: {x: 1, y: 1}
+    goalZone: {x: 8, y: 8}
+    keyZones: []
   map: {fileID: 11400000, guid: 469a6f40c1144d68b02df67c44e764fb, type: 2}
+  grassMaterial: {fileID: 2100000, guid: c8ca77e4f3374e69a48e40f5ff6a1e08, type: 2}
+  cliffMaterial: {fileID: 2100000, guid: d778c5652d7b4dfc8f16d1e24981fafa, type: 2}
+  rampMaterial: {fileID: 2100000, guid: 2dd15b4dfb05432b8b75946fbf8aa8c2, type: 2}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

@@ -48,11 +48,12 @@ namespace GameDev.RtsRpg
         public float BlockWorldSize { get; }
         public float HeightStepWorld { get; }
         public int BaseQuarterLevel { get; }
+        public int DetailSeed { get; }
 
-        internal TerrainSurface(int x, int z, float blockSize, float heightStep, int baseHeight, Cell[] data)
+        internal TerrainSurface(int x, int z, float blockSize, float heightStep, int baseHeight, Cell[] data, int detailSeed)
         {
             CellsX = x; CellsZ = z; BlockWorldSize = blockSize; HeightStepWorld = heightStep;
-            BaseQuarterLevel = baseHeight; cells = data;
+            BaseQuarterLevel = baseHeight; cells = data; DetailSeed = detailSeed;
         }
 
         public bool Contains(int x, int z) => x >= 0 && z >= 0 && x < CellsX && z < CellsZ;

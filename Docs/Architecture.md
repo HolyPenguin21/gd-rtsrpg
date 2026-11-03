@@ -4,7 +4,7 @@
 
 ## 1. Baseline — опубликованная основа Unity
 
-Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); Stage 01 принят и объединён через PR #3; ниже фактическое состояние с реализацией Stage 02, ожидающей ревью:
+Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); Stage 01 принят и объединён через PR #3; ниже фактическое состояние с принятым Stage 02 и текущей реализацией Stage 03, ожидающей ревью:
 
 - Unity **6000.5.4f1**, Universal Render Pipeline **17.5.0**.
 - `Assets/Scenes/SampleScene.unity` — единственная активная сцена в `ProjectSettings/EditorBuildSettings.asset`. Stage 01 добавляет два реальных класса Camera/Input (см. раздел 7).
@@ -82,13 +82,15 @@
 | `Assets/Camera/RtsCameraController.cs` | Единственный владелец ground reference XZ, pan velocity, target/current orthographic size и настроек камеры; включает локальную копию только карты Camera, освобождает её при уничтожении; скрывает debug marker при невалидном picking/disable | Camera на том же GameObject, Input System, существующий InputActionAsset, CursorWorldProjection; будущие RTS Controls могут вызывать `TryGetCursorWorldPoint(out Vector3)` |
 | `Assets/Camera/CursorWorldProjection.cs` | Stateless `TryGetCursorWorldPoint(Camera, Vector2, float, out Vector3)`: screen ray → горизонтальная математическая плоскость; при невалидных данных, экране вне pixelRect, параллельном луче или отрицательном расстоянии возвращает false и default output | Только Unity Camera/Plane/Vector; не знает Input, Physics, terrain и менеджеров; используется камерой и доступен будущим controls |
 | `Assets/InputSystem_Actions.inputactions` | Карта Camera: нормализуемый Pan (WASD/стрелки), Zoom (scroll/y), Drag (MMB), Point (mouse position); исходные Player/UI неизменны | Controller читает локальную копию Camera; source asset остаётся Project-wide Actions, другие карты контроллер не переключает |
-| `Assets/Scenes/SampleScene.unity` | Существующая ортографическая камера с controller и ссылками; свет/URP camera data/volume сохранены; один Terrain Builder с явной картой; временный Plane отключён, debug marker отключён через showCursorMarker | Ссылки на Input Actions, скрипт, preview materials; стартовая сцена в build settings сохранена |
-| `Assets/Camera/Preview/*` | Один простой URP unlit shader, два прежних материала; shader получил opt-in `_SurfaceShading` (по умолчанию 0), используемый материалом terrain для читаемости уступов | Нет C#-классов, генерации mesh, физических запросов или terrain-модели |
-| `Assets/Terrain/TerrainMapData.cs` (`TerrainMapData`, `TerrainRamp`, `TerrainDirection`) | ScriptableObject: размеры, уровни row-major, масштаб, явные рампы; CreateSurface валидирует исходные данные и создаёт отдельный неизменяемый снимок | UnityEngine/System; не знает mesh, Input, Physics и навигацию |
-| `Assets/Terrain/TerrainSurface.cs` (`TerrainSurface`, вложенный `Cell`) | 4×4 области на блок, целочисленные четверти уровня в углах, номер/ориентация рампы, профили граней и геометрически непроходимые границы | Только Unity math; читается Builder; будущая Navigation должна отдельно решать footprint/диагонали/занятость |
-| `Assets/Terrain/TerrainBuilder.cs` (`TerrainBuilder`) | Строит один mesh из TerrainSurface, один верх на подячейку, вертикальные стенки на разрывах и по периметру; владеет жизненным циклом mesh | TerrainMapData/Surface, MeshFilter/MeshRenderer; OnEnable или явный Rebuild; нет Update, collider, Physics и picking |
-| `Assets/Terrain/DemoTerrain.asset`, `TerrainPreview.mat` | Явная карта 6×5, уровни 0/1/2, рампы 1/4/3 подячейки; простой URP preview | Данные карты отделены от mesh; материал использует существующий preview shader |
+| `Assets/Scenes/SampleScene.unity` | Существующая ортографическая камера с controller и ссылками; свет/URP camera data/volume сохранены; один Terrain Builder с переключателем явной/контрольной/процедурной карты; временный Plane отключён, debug marker отключён через showCursorMarker | Ссылки на Input Actions, скрипт, preview materials; стартовая сцена в build settings сохранена |
+| `Assets/Camera/Preview/*` | Один простой URP unlit shader, два прежних материала; сохранён прежний opt-in `_SurfaceShading` (по умолчанию 0); террейн Stage 03 использует отдельный Terrain Surface shader | Нет C#-классов, генерации mesh, физических запросов или terrain-модели |
+| `Assets/Terrain/TerrainMapData.cs` (`TerrainMapData`, `TerrainRamp`, `TerrainDirection`) | ScriptableObject и статическая фабрика runtime-входа: размеры, уровни row-major, масштаб, рампы с cutIntoCliff; один CreateSurface валидирует оба входа и создаёт неизменяемый снимок | UnityEngine/System; не знает mesh, Input, Physics и навигацию |
+| `Assets/Terrain/TerrainSurface.cs` (`TerrainSurface`, вложенный `Cell`) | 4×4 области на блок, целочисленные четверти уровня в углах, номер/ориентация рампы, DetailSeed, профили граней и геометрически непроходимые границы | Только Unity math; читается Builder; будущая Navigation должна отдельно решать footprint/диагонали/занятость |
+| `Assets/Terrain/TerrainBuilder.cs` (`TerrainBuilder`) | Строит один mesh / три submesh из TerrainSurface, один верх на подячейку, гранёные стенки на разрывах и по периметру; владеет выбором источника и жизненным циклом mesh | TerrainMapData/Surface, MeshFilter/MeshRenderer; OnEnable или явный Rebuild; нет Update, collider, Physics и picking |
+| `Assets/Terrain/DemoTerrain.asset`, `TerrainPreview.mat` | Явная карта 6×5, уровни 0/1/2, рампы 1/4/3 подячейки с каменными плечами; URP grass material | Данные отделены от mesh; TerrainPreview GUID сохранён, материал переведён на Terrain Surface shader |
 | `Assets/Settings/*`, `Assets/TutorialInfo/*` | Исходные URP assets и поддержка Unity tutorial | Сохранены без изменений |
+| `Assets/Terrain/ProceduralTerrainGenerator.cs` | ProceduralMapSettings и статический генератор входных уровней/рамп: ключевые блоки → террасы → проходы → flood fill по геометрическим границам → ограниченная вариация → повторная проверка; локальный xorshift32 | Вызывает общую TerrainMapData.CreateSurface; не строит mesh, не меняет ScriptableObject и не выдаёт маршрутов |
+| `Assets/Terrain/TerrainSurface.shader`, `Cliff.mat`, `Ramp.mat`, `RampDirections.asset` | Три материала по типам геометрии; мировой 3D grain; явная контрольная карта N/E/S/W | Renderer получает ровно три слота; shader не определяет тип поверхности по высоте/уклону |
 | Units, navigation, combat и следующие Stage | **Не реализовано** | Не создавать потребителей заранее |
 
 ### Stage 01: фактические правила
@@ -110,7 +112,18 @@
 - Вершины на границах совпадают по координатам; нормали граней раздельные для резких уступов. Наружные стенки доходят до уровня на один шаг ниже минимума. Дно не строится.
 - TerrainSurface возвращает локальные координаты mesh. В демо Transform = translation (-12,0,-10), rotation identity, scale (1,1,1). Для world point потребитель должен применить TransformPoint; сведения о поверхности не являются screen picking.
 - Камера и Input не менялись. Plane отключён и showCursorMarker=false; математическая проекция Y=planeHeight остаётся прежней, в том числе для MMB drag. Настоящий terrain picking не реализован.
-- Детали формата, ограничений и ручной проверки: [Stage02Terrain.md](Stage02Terrain.md). Stage 02 реализован в исходниках, не принят; Unity проверки NOT RUN.
+- Детали формата, ограничений и ручной проверки: [Stage02Terrain.md](Stage02Terrain.md). Stage 02 принят и объединён через PR #5, commit `59e65c5bd24f8e0b84887b3a2319a76c8afb403f`; Unity проверки этой реализации NOT RUN.
+
+### Stage 03: фактические правила
+
+- `cutIntoCliff=false` сохраняет старую сериализацию; true поднимает только плоские плечи внутри блока рампы до L+1. Это записывается в Cell, а не скрывается в mesh. Рампа сохраняет точную ширину, ось, длину и четверти высоты. Cliff-cut занимает определение целого блока; конфликт с другой рампой отклоняется. DemoTerrain мигрирован с сохранением GUID, позиций и ширин проходов.
+- Общая фабрика CreateSurface работает напрямую с временными массивами генератора; никакой runtime-мутации asset. Seed хранится в неизменяемом Surface для вариации граней. Правила validation не скопированы в генератор.
+- В стенке сохранены четыре граничных ребра. Неровный внутренний центр создаёт реальные неплоские скальные грани; выемка направлена внутрь массива скалы, не в проход. Верхние плоскости, ширины и профили границ не меняются декоративным шумом. Верхняя линия внутри блока остаётся дискретной; изломы силуэта дают геометрия плеч и неровная разметка блоков.
+- Submeshes 0/1/2 = grass/cliff/ramp. Один MeshRenderer; материалы выбирает Builder из Cell.IsRamp / правила стенки. Shader даёт 3D world-space variation и освещение основным светом/SH, без UV-растяжения и независимого определения типа поверхности. Динамические тени/LOD не добавлены.
+- Генератор ограничен 8..48 блоками по каждой оси и 1..4 переходами; одна ограниченная попытка. Геометрический flood fill четырёх общих рёбер проверяет плоские ключевые блоки до/после вариации. Это проверка карты, не Navigation, A* или footprint-путь.
+- SampleScene открывается на явной 6×5. Source и Context Menu переключают её на карту четырёх направлений или seed 104729/130363. Новых сцен/менеджеров нет. SceneRoots и ссылки на корневой Transform terrain проверены и сохранены.
+- Camera/Input код не менялся. Только demo tilt=55°, initialZoom=15. Маркер отключён; математическая плоскость cursor/drag остаётся прежней.
+- Ручной игровой визуальный контроль до генерации недоступен (Unity отсутствует); A–C проверены по исходникам перед D. **Визуальная приёмка A–C остаётся открытой**, Stage 03 не принят. См. [Stage03ProceduralMap.md](Stage03ProceduralMap.md).
 
 ## 8. Контроль изменений, качества и архитектуры
 
