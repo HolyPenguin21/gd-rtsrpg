@@ -4,12 +4,12 @@
 
 ## 1. Baseline — опубликованная основа Unity
 
-По файлам PR #1 (`bootstrap/00.1-unity-project`) подтверждено:
+Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); ниже фактическое состояние с реализацией Stage 01, ожидающей приёмки:
 
 - Unity **6000.5.4f1**, Universal Render Pipeline **17.5.0**.
-- `Assets/Scenes/SampleScene.unity` — единственная активная сцена в `ProjectSettings/EditorBuildSettings.asset`. Game runtime scripts отсутствуют.
-- Камера сцены пока **perspective** (`orthographic: 0`), перевод в ортографическую проекцию относится к **Stage 01**, не является дефектом Bootstrap.
-- `Assets/InputSystem_Actions.inputactions` содержит стандартные карты `Player` и `UI`, включая шаблонные Jump/Attack/Crouch. Это **не согласованная RTS-раскладка**; Stage 01 должен сначала изучить эти действия, а не создавать параллельный ввод.
+- `Assets/Scenes/SampleScene.unity` — единственная активная сцена в `ProjectSettings/EditorBuildSettings.asset`. Stage 01 добавляет два реальных класса Camera/Input (см. раздел 7).
+- Stage 00.1 принят: PR #1 объединён в `main` (`38e28055d0ab9cf2968adebaa5d8e0fc7e736782`). В Stage 01 камера сцены переведена в **orthographic**, наклон 45°, reference XZ=(0,0), высота 25, size=12. Stage 01 ожидает менеджерской приёмки.
+- `Assets/InputSystem_Actions.inputactions` сохранён с исходными картами `Player`/`UI` и их GUID; в этот же asset добавлена карта `Camera` (Pan, Zoom, Drag, Point). Её раскладка — локальный стандарт Issue #2, не контракт управления будущих стадий.
 - `Assets/Settings/*` содержит URP-asset, renderer и volume. `Assets/TutorialInfo/*` содержит учебные Readme/Editor скрипты Unity, а не игровой код.
 - `Packages/manifest.json`: Input System **1.19.0**, URP **17.5.0**. Также в составе стандартного шаблона есть AI Navigation **2.0.13** и Test Framework **1.7.0**. Присутствие пакета **не разрешает** применять NavMesh или создавать тесты.
 - Ревью выполнено по опубликованным текстовым данным. Компиляция проекта и Play Mode **NOT RUN** в среде менеджера.
@@ -19,7 +19,7 @@
 ## 2. Базовые технологии и координаты
 
 - **Unity 6 + URP**, 3D земля и 2D рисованные фэнтезийные спрайты в 3D-мире; **не пиксель-арт**.
-- Камера ортографическая сверху под небольшим углом; её реализация запланирована на Stage 01.
+- Камера ортографическая сверху под небольшим углом; реализована в Stage 01; ручная Unity-проверка пока NOT RUN.
 - Конвенция координат: **XZ** — горизонтальная плоскость мира, **Y** — высота.
 - Базовая реализация — простые MonoBehaviour и обычные типы данных по необходимости, без ECS, Jobs/Burst, service locator и инфраструктуры «про запас».
 - Навигация наземная и **собственная**, без Unity NavMesh. Даже если модуль AI Navigation присутствует среди пакетов, в игровой логике он не используется.
@@ -77,15 +77,26 @@
 
 ## 7. Фактические модули и границы данных
 
-| Реальный путь | Роль | Статус |
+| Реальный путь / класс | Ответственность и данные | Зависимости / потребители |
 |---|---|---|
-| `Assets/Scenes/SampleScene.unity` | Стартовая Unity-сцена | Есть, камера template perspective |
-| `Assets/InputSystem_Actions.inputactions` | Исходные Player/UI input maps | Есть, ещё **не** RTS input |
-| `Assets/Settings/*` | Настройки URP/renderer | Есть |
-| `Assets/TutorialInfo/*` | Шаблонный Unity tutorial | Есть; не runtime gameplay |
-| Gameplay code (камера, terrain, units, nav, combat) | Пока отсутствует | **Не реализовано** |
+| `Assets/Camera/RtsCameraController.cs` | Единственный владелец ground reference XZ, pan velocity, target/current orthographic size и настроек камеры; включает локальную копию только карты Camera, освобождает её при уничтожении; скрывает debug marker при невалидном picking/disable | Camera на том же GameObject, Input System, существующий InputActionAsset, CursorWorldProjection; будущие RTS Controls могут вызывать `TryGetCursorWorldPoint(out Vector3)` |
+| `Assets/Camera/CursorWorldProjection.cs` | Stateless `TryGetCursorWorldPoint(Camera, Vector2, float, out Vector3)`: screen ray → горизонтальная математическая плоскость; при невалидных данных, экране вне pixelRect, параллельном луче или отрицательном расстоянии возвращает false и default output | Только Unity Camera/Plane/Vector; не знает Input, Physics, terrain и менеджеров; используется камерой и доступен будущим controls |
+| `Assets/InputSystem_Actions.inputactions` | Карта Camera: нормализуемый Pan (WASD/стрелки), Zoom (scroll/y), Drag (MMB), Point (mouse position); исходные Player/UI неизменны | Controller читает локальную копию Camera; source asset остаётся Project-wide Actions, другие карты контроллер не переключает |
+| `Assets/Scenes/SampleScene.unity` | Существующая ортографическая камера с controller и ссылками; свет/URP camera data/volume сохранены; один временный Plane и отдельный debug marker без коллайдеров | Ссылки на Input Actions, скрипт, preview materials; стартовая сцена в build settings сохранена |
+| `Assets/Camera/Preview/*` | Один простой URP unlit shader, два материала: сетка временной плоскости и цвет маркера; только ручная проверка камеры | Нет C#-классов, генерации mesh, физических запросов или terrain-модели |
+| `Assets/Settings/*`, `Assets/TutorialInfo/*` | Исходные URP assets и поддержка Unity tutorial | Сохранены без изменений |
+| Terrain, units, navigation, combat и следующие Stage | **Не реализовано** | Не создавать потребителей заранее |
 
-Для нового модуля после реализации добавить фактический путь/класс, ответственность, владельца данных, зависимости и потребителей. Не проектировать `Core/Managers/Services` абстрактно.
+### Stage 01: фактические правила
+
+- Контроллер расположен прямо на Main Camera; отдельный rig/manager не нужен. `groundPosition` — точка обзора XZ на `planeHeight`. Положение камеры вычисляется из неё, высоты и фиксированного наклона, yaw=0. W/↑ = +Z (экран вверх), D/→ = +X (экран вправо).
+- Экспоненциальный отклик скорости с точным интегралом за кадр и сглаживание size используют `Time.unscaledDeltaTime`. Отпускание клавиш немедленно обнуляет velocity; удержание MMB приоритетнее клавиатуры. При потере focus/disable сбрасывается drag baseline и velocity.
+- Drag берёт два положения курсора, проецирует их одной текущей позой камеры и переносит reference на разность точек. Первый кадр удержания только запоминается. Нет зависимости от FPS/высоты/zoom через подобранный pixel multiplier.
+- Bounds ограничивают только ground reference XZ, не frustum. Их можно выключить. Zoom target и текущий size ограничены отдельно; настройки min/max исправляются OnValidate.
+- Player/Move и UI/Navigate уже содержат WASD/стрелки; UI/MiddleClick и UI/ScrollWheel — MMB/колесо. Они сохранены как template/UI. В сцене нет PlayerInput или EventSystem и нет читателей этих действий. Controller включает только свою копию Camera, поэтому конкурирующих обработчиков сейчас нет. Будущая UI-интеграция должна отдельно определить политику перехвата ввода.
+- Числа камеры, размер/сетка контрольной плоскости — редактируемые значения для Stage 01, **не** размер блока или контракт будущей карты. Точка picking может быть за краями конечного Plane: математическая плоскость бесконечна.
+- Ввод и pose применяются в LateUpdate; дальнейшим потребителям нужны текущая Camera и свежий вызов picking после обновления камеры, а не сохранённая координата прошлого кадра.
+- Полная таблица Inspector-настроек и честный статус проверок: [Stage01Camera.md](Stage01Camera.md).
 
 ## 8. Контроль изменений, качества и архитектуры
 

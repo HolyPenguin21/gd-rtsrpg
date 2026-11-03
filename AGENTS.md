@@ -12,12 +12,12 @@ Read this file before changing any source or Unity scene. This repository is a U
 
 Before implementing anything, inspect the current repository and the real affected code. Never assume a future module already exists because it appears in the roadmap.
 
-## Current baseline (Stage 00.1)
+## Current baseline (Stage 00.1 merged; Stage 01 pending acceptance)
 
 - Unity **6000.5.4f1**, URP **17.5.0**.
 - The only scene is `Assets/Scenes/SampleScene.unity`.
-- No game runtime code currently exists; `Assets/TutorialInfo` is Unity template support.
-- The camera and `InputSystem_Actions.inputactions` are **template content**, not approved RTS gameplay controls. Camera/Input belongs to **Stage 01**.
+- `Assets/Camera/RtsCameraController.cs` owns the camera; `CursorWorldProjection.cs` owns stateless mathematical plane picking. `Assets/TutorialInfo` remains Unity template support.
+- SampleScene now has the Stage 01 orthographic camera, a temporary reference Plane and cursor marker. The existing Input Actions asset has a Camera map; original Player/UI template maps are preserved. Stage 01 awaits manager acceptance; Unity checks are NOT RUN here.
 
 ## Mandatory rules
 
