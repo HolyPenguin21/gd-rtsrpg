@@ -311,6 +311,8 @@ GameObject:
   - component: {fileID: 1003002}
   - component: {fileID: 1003003}
   - component: {fileID: 1003004}
+  - component: {fileID: 1003005}
+  - component: {fileID: 1003006}
   m_Layer: 0
   m_Name: Terrain (explicit or seeded)
   m_TagString: Untagged
@@ -772,6 +774,47 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1003005
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1003000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4149f9f7782e465f80e62f0bd42a89b6, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+--- !u!114 &1003006
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1003000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8bc33ed84521498d8abd8a053f5e6c76, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  lineMaterial: {fileID: 2100000, guid: 323d96cbe4544dd39cadb42d7cd06e5f, type: 2}
+  start: {x: 1, y: 1}
+  goal: {x: 20, y: 10}
+  footprint: {x: 1, y: 1}
+  startFacing: 0
+  goalFacing: 0
+  allowPartial: 0
+  maxExpanded: 20000
+  groupRadius: 12
+  showBoundaries: 1
+  showPanel: 1
+  blocker:
+    serializedVersion: 2
+    x: 12
+    y: 4
+    width: 4
+    height: 4
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

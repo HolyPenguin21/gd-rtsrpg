@@ -69,13 +69,21 @@ Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/4
 
 Документация фактической архитектуры обновлена. Статический аудит выполнен; Unity import, C#/shader compilation, открытие сцены и Play Mode — **NOT RUN**, редактор отсутствует. Процедура ручной приёмки: [Stage02Terrain.md](Stage02Terrain.md). Stage 02 объединён через PR #5, commit `59e65c5bd24f8e0b84887b3a2319a76c8afb403f`. Исходный Stage 02 не включал генерацию; визуальные замечания владельца включены в Issue #6.
 
-## Stage 03 — текущий, реализация Issue #6 ожидает ревью
+## Stage 03 — код объединён, визуальная приёмка открыта
 
 Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/6
 
-Сначала переработаны проходы в уступе, скальные грани и три покрытия; затем добавлен генератор входных данных. Ручной визуальный контроль A–C недоступен: Unity отсутствует, визуальная приёмка остаётся открытой. Детали параметров, seed и ручных проверок: [Stage03ProceduralMap.md](Stage03ProceduralMap.md). PR не сливается самостоятельно. Следующий отдельный этап — Stage 04 Navigation.
+Сначала переработаны проходы в уступе, скальные грани и три покрытия; затем добавлен генератор входных данных. Ручной визуальный контроль A–C недоступен: Unity отсутствует, визуальная приёмка остаётся открытой. Детали параметров, seed и ручных проверок: [Stage03ProceduralMap.md](Stage03ProceduralMap.md). PR #8 объединён в main, commit `60cb36f818889515498d2613d2a628fb421a1688`. Подтверждение ручной проверки владельцем ещё требуется; объединение кода не означает Unity-приёмку.
 
 Процедурный генератор создаёт ограниченную карту по seed. Сначала логические зоны, стартовые точки, маршруты/рампы и проверка связности; затем декоративный шум. Использует Stage 02 Terrain Builder, не дублирует построение mesh. Критерии: повторяемость seed и связность необходимых областей.
+
+## Stage 04 — реализация Issue #7, приёмка открыта
+
+Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/7
+
+Добавлены NavigationGrid/Pathfinder/GroupPlanner и контракты footprint/pose/path, TerrainNavigation lifetime, SurfaceChanged у единственного Builder и debug demo в SampleScene. Используется реальная объединённая TerrainSurface без второй карты высот. Есть bounded A*, проверка swept space/поворотов, static blocker rectangles, revision invalidation, расширяемые групповые destinations и общий corridor. Следующий Stage 05 (движение, столкновения, live occupancy) не реализован.
+
+Реализация подготовлена по запросу владельца в отдельной ветке/PR; не сливать до менеджерского ревью. Открытая зависимость: ручная визуальная/runtime-проверка Stage 03 владельцем, требуемая Issue #7. Unity import/compile, Play Mode и все runtime-сценарии Stage 04 — **NOT RUN**, редактор недоступен. Параметры, ограничения и процедура проверки: [Stage04Navigation.md](Stage04Navigation.md).
 
 ## Проверка
 

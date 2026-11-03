@@ -1,0 +1,154 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace GameDev.RtsRpg
+{
+    public readonly struct NavigationMember
+    {
+        public NavigationPose Start { get; }
+        public NavigationFootprint Footprint { get; }
+        public NavigationMember(NavigationPose start, NavigationFootprint footprint) { Start = start; Footprint = footprint; }
+    }
+
+    public sealed class NavigationGroupResult
+    {
+        private readonly NavigationGrid grid;
+        public int Revision { get; }
+        public bool IsCurrent => grid.IsAlive && Revision == grid.Revision;
+        public IReadOnlyList<NavigationPath> Paths { get; }
+        public IReadOnlyList<Vector2Int> Corridor { get; }
+        public int Accepted { get; }
+        public int Expanded { get; }
+        public NavigationStatus Status { get; }
+        internal NavigationGroupResult(NavigationGrid grid, List<NavigationPath> paths,
+            List<Vector2Int> corridor, int accepted, int expanded)
+        {
+            this.grid = grid; Revision = grid.Revision; Paths = paths.AsReadOnly(); Corridor = corridor.AsReadOnly();
+            Accepted = accepted; Expanded = expanded;
+            Status = accepted == paths.Count && accepted > 0 ? NavigationStatus.Success
+                : accepted > 0 ? NavigationStatus.Partial : NavigationStatus.NoPath;
+        }
+    }
+
+    /// <summary>Shared guide corridor + bounded local A*, temporary destination reservations only.</summary>
+    public sealed class NavigationGroupPlanner
+    {
+        private readonly NavigationGrid grid;
+        private readonly NavigationPathfinder finder;
+        public NavigationGroupPlanner(NavigationGrid grid)
+        { this.grid = grid ?? throw new ArgumentNullException(nameof(grid)); finder = new NavigationPathfinder(grid); }
+
+        public NavigationGroupResult Plan(IReadOnlyList<NavigationMember> members, Vector2Int target,
+            int radius = 12, int totalExpanded = 80000, int localExpanded = 8000, int candidatesPerMember = 32)
+        {
+            if (members == null || members.Count < 1 || members.Count > 100 || radius < 0 || radius > 32
+                || totalExpanded < 1 || totalExpanded > 1000000 || localExpanded < 1 || localExpanded > 1000000
+                || candidatesPerMember < 1 || candidatesPerMember > 128)
+                throw new ArgumentException("Group: 1..100 members, radius 0..32, budgets 1..1000000, candidates 1..128 required.");
+            var budget = new NavigationBudget(totalExpanded);
+            var results = new List<NavigationPath>();
+            var guide = new List<Vector2Int>();
+            var corridor = new HashSet<Vector2Int>();
+            var reserved = new HashSet<Vector2Int>();
+            var candidates = new List<Vector2Int>();
+            // Reject unbounded target arithmetic; outside clicks are reported for each member.
+            bool targetInside = grid.Surface.Contains(target.x, target.y);
+            if (targetInside)
+            for (int r = 0; r <= radius; r++)
+            for (int z = target.y - r; z <= target.y + r; z++)
+            for (int x = target.x - r; x <= target.x + r; x++)
+                if (Math.Max(Math.Abs(x - target.x), Math.Abs(z - target.y)) == r && grid.Surface.Contains(x, z))
+                    candidates.Add(new Vector2Int(x, z));
+
+            // One shared route for a 1x1 guide. Only actual success seeds a corridor.
+            if (targetInside)
+            {
+                var small = new NavigationFootprint(1, 1);
+                var common = finder.Find(new NavigationRequest(new NavigationPose(members[0].Start.Cell),
+                    new NavigationPose(target), small, Math.Min(localExpanded, totalExpanded)), budget);
+                if (common.Status == NavigationStatus.Success)
+                foreach (var p in common.Points)
+                {
+                    guide.Add(p.Pose.Cell);
+                    for (int z = -2; z <= 2; z++)
+                    for (int x = -2; x <= 2; x++) corridor.Add(p.Pose.Cell + new Vector2Int(x, z));
+                }
+            }
+            // Stable larger-first allocation reduces starvation; results retain input indices.
+            var order = new List<int>();
+            for (int i = 0; i < members.Count; i++) { order.Add(i); results.Add(null); }
+            order.Sort((a, b) =>
+            {
+                long aa = (long)members[a].Footprint.Width * members[a].Footprint.Length;
+                long bb = (long)members[b].Footprint.Width * members[b].Footprint.Length;
+                int size = bb.CompareTo(aa); return size != 0 ? size : a.CompareTo(b);
+            });
+            int accepted = 0;
+            foreach (int index in order)
+            {
+                var member = members[index];
+                NavigationPath failure = null;
+                if (!grid.IsAlive) failure = new NavigationPath(grid, NavigationStatus.Stale, "Grid retired.");
+                else if (!member.Footprint.IsValid || (uint)member.Start.Facing > 3)
+                    failure = new NavigationPath(grid, NavigationStatus.InvalidRequest, "Unsupported footprint or facing.");
+                else if (!grid.CanOccupy(member.Start, member.Footprint))
+                    failure = new NavigationPath(grid, NavigationStatus.InvalidStart, "Invalid group member start.");
+                else if (!targetInside) failure = new NavigationPath(grid, NavigationStatus.InvalidGoal, "Group target is outside the map.");
+                if (failure != null) { results[index] = failure; continue; }
+                int tried = 0, memberRemaining = localExpanded;
+                foreach (var cell in candidates)
+                {
+                    // Try N/E/S/W for rectangles; no need for duplicate square poses.
+                    int orientations = member.Footprint.NeedsTurns ? 4 : 1;
+                    for (int facing = 0; facing < orientations; facing++)
+                    {
+                        var goal = new NavigationPose(cell, (TerrainDirection)facing);
+                        if (!grid.CanOccupy(goal, member.Footprint) || Overlaps(goal, member.Footprint, reserved)) continue;
+                        if (tried++ >= candidatesPerMember || budget.Remaining == 0 || memberRemaining == 0) break;
+                        NavigationPath path = null;
+                        int before = budget.Remaining;
+                        if (corridor.Contains(member.Start.Cell) && corridor.Contains(goal.Cell))
+                        {
+                            path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, memberRemaining), budget, corridor, true);
+                            memberRemaining -= before - budget.Remaining;
+                        }
+                        if ((path == null || path.Status != NavigationStatus.Success) && memberRemaining > 0 && budget.Remaining > 0)
+                        {
+                            before = budget.Remaining;
+                            path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, memberRemaining), budget, corridor);
+                            memberRemaining -= before - budget.Remaining;
+                        }
+                        if (path == null) break;
+                        failure = path;
+                        if (path.Status != NavigationStatus.Success) continue;
+                        results[index] = path; accepted++; Reserve(goal, member.Footprint, reserved); break;
+                    }
+                    if (results[index] != null || tried >= candidatesPerMember || budget.Remaining == 0 || memberRemaining == 0) break;
+                }
+                if (results[index] == null)
+                    results[index] = new NavigationPath(grid,
+                        budget.Remaining == 0 || tried >= candidatesPerMember || memberRemaining == 0 ? NavigationStatus.BudgetExceeded
+                            : failure?.Status ?? NavigationStatus.NoPath,
+                        budget.Remaining == 0 || tried >= candidatesPerMember || memberRemaining == 0
+                            ? "Group expansion/candidate cap reached; member not assigned. Explicit retry is required."
+                            : failure?.Reason ?? "No reachable, non-overlapping destination within the search radius.");
+            }
+            return new NavigationGroupResult(grid, results, guide, accepted, totalExpanded - budget.Remaining);
+        }
+
+        private static bool Overlaps(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved)
+        {
+            Vector2Int s = f.Size(p.Facing);
+            for (int z = 0; z < s.y; z++)
+            for (int x = 0; x < s.x; x++) if (reserved.Contains(p.Cell + new Vector2Int(x, z))) return true;
+            return false;
+        }
+        private static void Reserve(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved)
+        {
+            Vector2Int s = f.Size(p.Facing);
+            for (int z = 0; z < s.y; z++)
+            for (int x = 0; x < s.x; x++) reserved.Add(p.Cell + new Vector2Int(x, z));
+        }
+    }
+}
