@@ -264,6 +264,7 @@ namespace GameDev.RtsRpg
             {
                 start = new Vector2Int(9, 1); goal = start; footprint = new Vector2Int(1, 2);
                 goalFacing = TerrainDirection.East;
+                movementDemo = true;
             }
             Replan();
         }
@@ -374,6 +375,8 @@ namespace GameDev.RtsRpg
             GUILayout.EndHorizontal(); GUILayout.BeginHorizontal();
             if (GUILayout.Button("Add/remove blocker")) ToggleBlocker();
             if (GUILayout.Button("Replan")) Replan();
+            bool execute = GUILayout.Toggle(movementDemo, "Move units");
+            if (execute != movementDemo) { movementDemo = execute; Replan(); }
             GUILayout.EndHorizontal();
             bool visible = GUILayout.Toggle(showBoundaries, "Show impassable geometry (display capped at 192 segments)");
             if (visible != showBoundaries) { showBoundaries = visible; ClearLines(); DrawGeometry(); paths.Clear(); report = "Display changed; press Replan to redraw routes."; }
