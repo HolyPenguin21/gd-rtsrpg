@@ -1,0 +1,32 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ecbfdbc26e104d1eaf4536dbeb47e9f9, type: 3}
+  m_Name: DemoTerrain
+  m_EditorClassIdentifier:
+  width: 6
+  length: 5
+  blockWorldSize: 4
+  heightStepWorld: 2
+  levels: 000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000100000001000000010000000100000001000000010000000100000001000000010000000100000001000000020000000200000002000000020000000200000002000000
+  ramps:
+  - block: {x: 1, y: 1}
+    uphill: 0
+    startSubcell: 1
+    widthSubcells: 1
+  - block: {x: 3, y: 1}
+    uphill: 0
+    startSubcell: 0
+    widthSubcells: 4
+  - block: {x: 2, y: 3}
+    uphill: 0
+    startSubcell: 0
+    widthSubcells: 3
