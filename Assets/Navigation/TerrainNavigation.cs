@@ -19,6 +19,7 @@ namespace GameDev.RtsRpg
         // Live occupancy only. The static grid never receives unit blockers or revision churn.
         internal int TrafficRevision { get; private set; }
         internal void NotifyTrafficChanged() => TrafficRevision++;
+        private static readonly Unity.Profiling.ProfilerMarker ContactMarker = new("Navigation.FindContact");
         private const float BucketSize = 4f;
         private readonly Dictionary<Vector2Int, List<UnitMovement>> traffic = new();
         private readonly Stack<List<UnitMovement>> spareBuckets = new();
@@ -50,7 +51,9 @@ namespace GameDev.RtsRpg
         internal UnitMovement FindContact(UnitMovement requester, Rect area,
             bool search = false, bool avoidAllies = false)
         {
-            // Include the moving footprint and its retained retreat anchor.
+            using var marker = ContactMarker.Auto();
+            // A diagonal translating horse can retain its old anchor up to a
+            // whole cell away, plus its rotated body's half extent (~1.061).
             const float margin = 2.2f;
             var min = BucketAt(area.xMin - margin, area.yMin - margin);
             var max = BucketAt(area.xMax + margin, area.yMax + margin);
@@ -89,13 +92,14 @@ namespace GameDev.RtsRpg
         [ContextMenu("Rebuild Navigation (does not replan)")]
         public void Rebuild()
         {
+            var previous = Grid;
             Clear(); Error = null;
             if (builder == null) builder = GetComponent<TerrainBuilder>();
             matrix = builder.transform.localToWorldMatrix;
             if (builder.Surface == null) { Error = "Terrain is unavailable; rebuild Terrain Builder first."; return; }
             try
             {
-                Grid = new NavigationGrid(builder.Surface, matrix);
+                Grid = new NavigationGrid(builder.Surface, matrix, previous);
                 Grid.Changed += Notify;
             }
             catch (ArgumentException e) { Error = e.Message; Debug.LogError(Error, this); }

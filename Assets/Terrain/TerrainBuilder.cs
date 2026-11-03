@@ -129,13 +129,13 @@ namespace GameDev.RtsRpg
                 Vector3 nw = surface.Position(x, z + 1, cell.Corner(0, 1));
                 Vector3 ne = surface.Position(x + 1, z + 1, cell.Corner(1, 1));
                 Vector3 se = surface.Position(x + 1, z, cell.Corner(1, 0));
-                Quad(sw, nw, ne, se, Vector3.up, vertices, triangles[cell.IsRamp ? 2 : 0]);
+                Top(sw, nw, ne, se, vertices, triangles[cell.IsRamp ? 2 : 0]);
 
                 // Each shared edge exactly once; west/south are only the outside perimeter.
-                Wall(surface, x, z, TerrainDirection.North, vertices, triangles[1]);
-                Wall(surface, x, z, TerrainDirection.East, vertices, triangles[1]);
-                if (z == 0) Wall(surface, x, z, TerrainDirection.South, vertices, triangles[1]);
-                if (x == 0) Wall(surface, x, z, TerrainDirection.West, vertices, triangles[1]);
+                Wall(surface, x, z, TerrainDirection.North, vertices, triangles);
+                Wall(surface, x, z, TerrainDirection.East, vertices, triangles);
+                if (z == 0) Wall(surface, x, z, TerrainDirection.South, vertices, triangles);
+                if (x == 0) Wall(surface, x, z, TerrainDirection.West, vertices, triangles);
             }
             var mesh = new Mesh { name = "Terrain (generated)", hideFlags = HideFlags.DontSave,
                 indexFormat = vertices.Count > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16 };
@@ -156,7 +156,7 @@ namespace GameDev.RtsRpg
         }
 
         private static void Wall(TerrainSurface surface, int x, int z, TerrainDirection side,
-            List<Vector3> vertices, List<int> triangles)
+            List<Vector3> vertices, List<int>[] materials)
         {
             surface.GetEdge(x, z, side, out int a, out int b);
             Vector2Int step = TerrainSurface.Step(side);
@@ -184,6 +184,17 @@ namespace GameDev.RtsRpg
             bool firstHigh = a > c || b > d;
             int hx = firstHigh ? x : x + step.x, hz = firstHigh ? z : z + step.y;
             int lx = firstHigh ? x + step.x : x, lz = firstHigh ? z + step.y : z;
+            List<int> triangles = materials[1];
+            Vector3 upperA = firstHigh ? p : t, upperB = firstHigh ? q : r;
+            Vector3 lowerA = firstHigh ? t : p, lowerB = firstHigh ? r : q;
+            var tangent = new Vector2Int(bx - ax, bz - az);
+            var normal = firstHigh ? step : -step;
+            var high = new Vector2Int(hx, hz);
+            var lipA = RimAt(surface, high, new Vector2Int(ax, az), firstHigh ? a : c, normal, -tangent);
+            var lipB = RimAt(surface, high, new Vector2Int(bx, bz), firstHigh ? b : d, normal, tangent);
+            BuildRim(surface, upperA, upperB, lowerA, lowerB, lipA, lipB, outward, tangent, hx, hz,
+                DetailHash(ax, az, bx, bz, surface.DetailSeed), vertices, materials);
+
             var before = step.x == 0 ? TerrainDirection.West : TerrainDirection.South;
             var after = TerrainSurface.Opposite(before);
             bool cornerA = IsCorner(before), cornerB = IsCorner(after);
@@ -205,8 +216,10 @@ namespace GameDev.RtsRpg
                 return Vector3.Lerp(upper, lower, down) - outward * (depth * inset);
             }
 
-            Vector3 upperA = firstHigh ? p : t, upperB = firstHigh ? q : r;
-            Vector3 lowerA = firstHigh ? t : p, lowerB = firstHigh ? r : q;
+            // The rock meets the underside of the turf on the same exact
+            // edge at both ends. Both wall bands taper to the ramp tips.
+            upperA -= Vector3.up * lipA.Depth;
+            upperB -= Vector3.up * lipB.Depth;
             // At shoulders the lower band narrows continuously into the ramp tip.
             Vector3 leftLip = Profile(u, 0.20f, 0.72f), rightLip = Profile(v, 0.25f, 0.83f);
             Vector3 leftBase = Profile(u, 0.72f, 1f), rightBase = Profile(v, 0.79f, 0.76f);
@@ -215,6 +228,119 @@ namespace GameDev.RtsRpg
             Quad(leftBase, rightBase, lowerB, lowerA, outward, vertices, triangles);
             Quad(upperA, leftLip, leftBase, lowerA, outward, vertices, triangles);
             Quad(upperB, rightLip, rightBase, lowerB, outward, vertices, triangles);
+        }
+
+        private readonly struct RimCorner
+        {
+            internal readonly Vector3 Offset;
+            internal readonly float Depth, SkirtDepth;
+            internal readonly bool Convex, Concave;
+            internal RimCorner(Vector3 offset, float depth, float skirtDepth, bool convex, bool concave)
+            { Offset = offset; Depth = depth; SkirtDepth = skirtDepth; Convex = convex; Concave = concave; }
+        }
+
+        private static Vector3 Horizontal(Vector2Int direction) => new(direction.x, 0f, direction.y);
+
+        private static RimCorner RimAt(TerrainSurface surface, Vector2Int upper, Vector2Int vertex,
+            int height, Vector2Int outward, Vector2Int beyond)
+        {
+            int Corner(Vector2Int cell) => surface.Contains(cell.x, cell.y)
+                ? surface.GetCell(cell.x, cell.y).Corner(vertex.x - cell.x, vertex.y - cell.y)
+                : surface.BaseQuarterLevel;
+
+            int across = Corner(upper + outward);
+            int beside = Corner(upper + beyond);
+            int diagonal = Corner(upper + outward + beyond);
+            if (across >= height || beside > height || diagonal > height
+                || (beside < height && diagonal == height)) return default;
+
+            // Both incident edges see the same four corner heights and the
+            // same hash. Shared endpoints do not depend on edge traversal.
+            int nextLower = Math.Max(across, Math.Max(beside < height ? beside : across,
+                diagonal < height ? diagonal : across));
+            float drop = (height - nextLower) * surface.HeightStepWorld * 0.25f;
+            float cellSize = surface.BlockWorldSize * 0.25f;
+            uint hash = DetailHash(vertex.x, vertex.y, vertex.x, vertex.y, surface.DetailSeed);
+            float width = Math.Min(cellSize * (0.065f + (hash & 255) * (0.045f / 255f)), RimReach(surface, drop));
+            float depth = Math.Min(cellSize * 0.065f, drop * 0.15f);
+            bool convex = beside < height, concave = diagonal == height;
+            // Adjacent concave strips share the diagonal end cut in the low
+            // quadrant. The nearby strip station rounds off the inside bend.
+            Vector3 offset = concave ? Horizontal(outward - beyond) * (width * 1.25f)
+                : Horizontal(outward) * width;
+            return new RimCorner(offset, depth, depth, convex, concave);
+        }
+
+        // Keep the skirt above the lowest clearance even when the lower
+        // surface is a ramp. An inside corner can extend on both axes.
+        private static float RimReach(TerrainSurface surface, float gap)
+            => gap / (4f * (1f + surface.HeightStepWorld / surface.BlockWorldSize));
+
+        private static void BuildRim(TerrainSurface surface, Vector3 a, Vector3 b, Vector3 lowA, Vector3 lowB,
+            RimCorner first, RimCorner last, Vector3 outward, Vector2Int tangent, int hx, int hz, uint hash,
+            List<Vector3> vertices, List<int>[] materials)
+        {
+            float cell = surface.BlockWorldSize * 0.25f;
+            List<int> cover = materials[surface.GetCell(hx, hz).IsRamp ? 2 : 0];
+            Vector3 previous = a;
+            var previousSection = first;
+            for (int i = 1; i <= 4; i++)
+            {
+                float along = i == 1 ? 0.2f : i == 2 ? 0.46f + (hash & 63) * (0.08f / 63f) : i == 3 ? 0.8f : 1f;
+                Vector3 top = Vector3.Lerp(a, b, along);
+                float gap = top.y - Mathf.Lerp(lowA.y, lowB.y, along);
+                var section = last;
+                if (i < 4)
+                {
+                    float width = cell * (0.045f + ((hash >> (i * 7)) & 127) * (0.095f / 127f));
+                    width = Math.Min(width, RimReach(surface, gap));
+                    // Keep the first/last stations next to an inside corner
+                    // far enough back that the strips meet only at their end cut.
+                    if ((i == 1 && first.Concave) || (i == 3 && last.Concave))
+                        width = Math.Min(width, cell * 0.085f);
+                    float depth = Mathf.Lerp(first.Depth, last.Depth, along);
+                    float skirt = Math.Max(depth, Math.Min(cell * 0.055f, gap * 0.15f));
+                    section = new RimCorner(outward * width, depth, skirt, false, false);
+                }
+                Strip(previous, top, previousSection, section, outward);
+                previous = top;
+                previousSection = section;
+            }
+
+            // A convex quadrant is emitted by its X-running edge only.
+            // The opposite end is exactly the endpoint of the perpendicular strip.
+            if (tangent.x != 0)
+            {
+                if (first.Convex) Fan(a, first, Horizontal(-tangent));
+                if (last.Convex) Fan(b, last, Horizontal(tangent));
+            }
+
+            void Fan(Vector3 corner, RimCorner section, Vector3 direction)
+            {
+                float width = section.Offset.magnitude;
+                var from = section;
+                for (int i = 1; i <= 3; i++)
+                {
+                    Vector3 normal = (outward * (3 - i) + direction * i).normalized;
+                    var to = new RimCorner(normal * width, section.Depth, section.SkirtDepth, false, false);
+                    Strip(corner, corner, from, to, (from.Offset + to.Offset).normalized);
+                    from = to;
+                }
+            }
+
+            void Strip(Vector3 start, Vector3 end, RimCorner left, RimCorner right, Vector3 normal)
+            {
+                if (left.Offset == Vector3.zero && right.Offset == Vector3.zero) return;
+                Vector3 outerA = start + left.Offset - Vector3.up * (left.SkirtDepth * 0.35f);
+                Vector3 outerB = end + right.Offset - Vector3.up * (right.SkirtDepth * 0.35f);
+                Vector3 bottomA = start - Vector3.up * left.Depth;
+                Vector3 bottomB = end - Vector3.up * right.Depth;
+                Vector3 skirtA = start + left.Offset * 0.82f - Vector3.up * left.SkirtDepth;
+                Vector3 skirtB = end + right.Offset * 0.82f - Vector3.up * right.SkirtDepth;
+                Quad(start, end, outerB, outerA, Vector3.up, vertices, cover);
+                Quad(outerA, outerB, skirtB, skirtA, normal, vertices, cover);
+                Quad(skirtA, skirtB, bottomB, bottomA, Vector3.down, vertices, cover);
+            }
         }
 
         private static uint DetailHash(int ax, int az, int bx, int bz, int seed)
@@ -226,6 +352,17 @@ namespace GameDev.RtsRpg
                 h ^= h >> 16; h *= 2246822519u; h ^= h >> 13;
                 return h;
             }
+        }
+
+        private static void Top(Vector3 sw, Vector3 nw, Vector3 ne, Vector3 se,
+            List<Vector3> vertices, List<int> triangles)
+        {
+            // The top is planar, so its two triangles can share corner
+            // vertices without smoothing across a cliff or material seam.
+            int first = vertices.Count;
+            vertices.Add(sw); vertices.Add(nw); vertices.Add(ne); vertices.Add(se);
+            triangles.Add(first); triangles.Add(first + 1); triangles.Add(first + 2);
+            triangles.Add(first); triangles.Add(first + 2); triangles.Add(first + 3);
         }
 
         private static void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 outward,

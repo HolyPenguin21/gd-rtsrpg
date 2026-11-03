@@ -86,9 +86,13 @@ Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/6
 
 [Issue #9](https://github.com/HolyPenguin21/gd-rtsrpg/issues/9) включает читаемые рампы, крупную карту с природными формами, интеграцию со Stage 04 и исполнение маршрутов. Описание и состояние проверок в [Stage05Movement.md](Stage05Movement.md). Код объединён через PR #11.
 
-## Stage 05.1 — на ревью
+## Stage 05.1 — объединён через PR #13
 
 [Issue #12](https://github.com/HolyPenguin21/gd-rtsrpg/issues/12) закрывает обнаруженные заторы, дорабатывает меш уступов и добавляет Follow Mouse в Army (64). Перед началом Stage 06 требуется приёмка по сценариям [Stage05Movement.md](Stage05Movement.md).
+
+## Stage 05.2 — Issue #14, на ревью
+
+Переработка A*, общего группового подхода и покадровой раздачи Follow Mouse, геометрия дернового края, движение 1×2 лицом вперёд. Профилирование и визуальная приёмка в Unity открыты. Stage 06 после приёмки Stage 05.2.
 
 ## Проверка
 
