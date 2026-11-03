@@ -24,6 +24,8 @@ namespace GameDev.RtsRpg
         internal bool AtAnchor => progress == 0f && !yieldTarget.HasValue && !retreating;
         internal bool HasRoute => path != null && path.IsCurrent;
         internal Rect Occupancy { get; private set; }
+        // The coordinator holds at most one anchored participant while a search spans frames.
+        internal bool Planning { get; set; }
 
         internal bool Reserves(Rect area)
         {
@@ -84,7 +86,7 @@ namespace GameDev.RtsRpg
             grid = null;
             path = null;
             yieldTarget = null;
-            retreating = false;
+            retreating = Planning = false;
             progress = wait = yieldUntil = 0f;
             State = Motion.Invalidated;
         }
@@ -115,7 +117,7 @@ namespace GameDev.RtsRpg
                 AbandonEdge();
             }
 
-            if (path == null && !yieldTarget.HasValue) return;
+            if (Planning || (path == null && !yieldTarget.HasValue)) return;
             if (!yieldTarget.HasValue && next >= path.Points.Count)
             {
                 State = path.Status == NavigationStatus.Partial ? Motion.Blocked : Motion.Arrived;
@@ -187,7 +189,7 @@ namespace GameDev.RtsRpg
 
         private void TryYield(Vector2 approach, UnitMovement requester)
         {
-            if (!AtAnchor || grid.Revision != revision || Time.time < yieldUntil
+            if (Planning || !AtAnchor || grid.Revision != revision || Time.time < yieldUntil
                 || (HasRoute && !Recovering)) return;
             Vector2Int forward = Mathf.Abs(approach.x) >= Mathf.Abs(approach.y)
                 ? Vector2Int.right * (approach.x >= 0 ? 1 : -1)

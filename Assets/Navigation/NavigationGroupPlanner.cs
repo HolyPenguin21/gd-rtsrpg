@@ -97,37 +97,29 @@ namespace GameDev.RtsRpg
                 else if (!targetInside) failure = new NavigationPath(grid, NavigationStatus.InvalidGoal, "Group target is outside the map.");
                 if (failure != null) { results[index] = failure; continue; }
                 int tried = 0, memberRemaining = localExpanded;
-                foreach (var cell in candidates)
+                foreach (var goal in DestinationCandidates(member.Footprint, candidates, reserved))
                 {
-                    // Try N/E/S/W for rectangles; no need for duplicate square poses.
-                    int orientations = member.Footprint.NeedsTurns ? 4 : 1;
-                    for (int facing = 0; facing < orientations; facing++)
+                    if (tried++ >= candidatesPerMember || budget.Remaining == 0 || memberRemaining == 0) break;
+                    NavigationPath path = null;
+                    int before = budget.Remaining;
+                    if (corridor.Contains(member.Start.Cell) && corridor.Contains(goal.Cell))
                     {
-                        var goal = new NavigationPose(cell, (TerrainDirection)facing);
-                        if (!grid.CanOccupy(goal, member.Footprint) || Overlaps(goal, member.Footprint, reserved)) continue;
-                        if (tried++ >= candidatesPerMember || budget.Remaining == 0 || memberRemaining == 0) break;
-                        NavigationPath path = null;
-                        int before = budget.Remaining;
-                        if (corridor.Contains(member.Start.Cell) && corridor.Contains(goal.Cell))
-                        {
-                            int corridorBudget = Math.Min(memberRemaining, budget.Remaining) / 3;
-                            if (corridorBudget > 0)
-                                path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, corridorBudget),
-                                    budget, corridor, true, allowsEdge);
-                            memberRemaining -= before - budget.Remaining;
-                        }
-                        if ((path == null || path.Status != NavigationStatus.Success) && memberRemaining > 0 && budget.Remaining > 0)
-                        {
-                            before = budget.Remaining;
-                            path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, memberRemaining), budget, corridor, allowsEdge: allowsEdge);
-                            memberRemaining -= before - budget.Remaining;
-                        }
-                        if (path == null) break;
-                        failure = path;
-                        if (path.Status != NavigationStatus.Success) continue;
-                        results[index] = path; accepted++; Reserve(goal, member.Footprint, reserved); break;
+                        int corridorBudget = Math.Min(memberRemaining, budget.Remaining) / 3;
+                        if (corridorBudget > 0)
+                            path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, corridorBudget),
+                                budget, corridor, true, allowsEdge);
+                        memberRemaining -= before - budget.Remaining;
                     }
-                    if (results[index] != null || tried >= candidatesPerMember || budget.Remaining == 0 || memberRemaining == 0) break;
+                    if ((path == null || path.Status != NavigationStatus.Success) && memberRemaining > 0 && budget.Remaining > 0)
+                    {
+                        before = budget.Remaining;
+                        path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, memberRemaining), budget, corridor, allowsEdge: allowsEdge);
+                        memberRemaining -= before - budget.Remaining;
+                    }
+                    if (path == null) break;
+                    failure = path;
+                    if (path.Status != NavigationStatus.Success) continue;
+                    results[index] = path; accepted++; Reserve(goal, member.Footprint, reserved); break;
                 }
                 if (results[index] == null)
                     results[index] = new NavigationPath(grid,
@@ -166,11 +158,31 @@ namespace GameDev.RtsRpg
             return cells;
         }
 
-        private static bool Overlaps(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved)
+        internal IEnumerable<NavigationPose> DestinationCandidates(NavigationFootprint footprint,
+            IReadOnlyList<Vector2Int> area, HashSet<Vector2Int> reserved, NavigationPose? ownSlot = null)
+        {
+            RectInt ownArea = ownSlot.HasValue
+                ? new RectInt(ownSlot.Value.Cell, footprint.Size(ownSlot.Value.Facing)) : default;
+            int orientations = footprint.NeedsTurns ? 4 : 1;
+            foreach (var cell in area)
+            for (int facing = 0; facing < orientations; facing++)
+            {
+                var pose = new NavigationPose(cell, (TerrainDirection)facing);
+                if (grid.CanOccupy(pose, footprint) && !Overlaps(pose, footprint, reserved, ownArea))
+                    yield return pose;
+            }
+        }
+
+        private static bool Overlaps(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved,
+            RectInt ownArea)
         {
             Vector2Int s = f.Size(p.Facing);
             for (int z = 0; z < s.y; z++)
-            for (int x = 0; x < s.x; x++) if (reserved.Contains(p.Cell + new Vector2Int(x, z))) return true;
+            for (int x = 0; x < s.x; x++)
+            {
+                var cell = p.Cell + new Vector2Int(x, z);
+                if (reserved.Contains(cell) && !ownArea.Contains(cell)) return true;
+            }
             return false;
         }
         internal static void Reserve(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved, bool add = true)
