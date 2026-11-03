@@ -12,13 +12,13 @@ Read this file before changing any source or Unity scene. This repository is a U
 
 Before implementing anything, inspect the current repository and the real affected code. Never assume a future module already exists because it appears in the roadmap.
 
-## Current baseline (Stage 01 merged; Stage 02 pending review)
+## Current baseline (Stage 02 merged; Stage 03 pending review)
 
 - Unity **6000.5.4f1**, URP **17.5.0**.
 - The only scene is `Assets/Scenes/SampleScene.unity`.
 - `Assets/Camera/RtsCameraController.cs` owns the camera; `CursorWorldProjection.cs` owns stateless mathematical plane picking. `Assets/TutorialInfo` remains Unity template support.
 - Stage 01 was accepted and merged in PR #3. Its camera/Input and plane projection are preserved.
-- `Assets/Terrain/` owns Stage 02: TerrainMapData (authored input/validation), TerrainSurface (immutable 4x4 geometry), TerrainBuilder (single mesh and lifetime). SampleScene references DemoTerrain; old Plane and cursor marker are disabled. Stage 02 awaits review; Unity checks are NOT RUN here.
+- `Assets/Terrain/` owns Stage 02: TerrainMapData (authored input/validation), TerrainSurface (immutable 4x4 geometry), TerrainBuilder (single mesh and lifetime). SampleScene references DemoTerrain; old Plane and cursor marker are disabled. Stage 02 merged in PR #5. Stage 03 extends the same data/surface/builder with cliff-cut ramps, three surface materials and seed-based input generation. Unity checks are NOT RUN here.
 
 ## Mandatory rules
 
@@ -41,4 +41,4 @@ Provide: changed systems and files; why those changes are within scope; dependen
 
 ## Scope reminder
 
-Stage 02 = explicit terrain data, static mesh, cliffs, variable-width ramps and static geometric boundary information. No procedural generation, terrain picking, unit selection, A*, movement, combat, RPG, save systems or RTS base economy until their own stages.
+Stage 03 = readable terrain, seeded input generation, required-zone connectivity and the existing single builder. See Docs/Stage03ProceduralMap.md. No terrain picking, unit selection, A*, movement, combat, RPG, save systems or RTS base economy until their own stages.

@@ -8,7 +8,7 @@ Material:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_Name: TerrainPreview
-  m_Shader: {fileID: 4800000, guid: 1da12db9b8374601b537c87f75c05daa, type: 3}
+  m_Shader: {fileID: 4800000, guid: a87959449a7a40458fe26a19612121ae, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []
@@ -25,10 +25,9 @@ Material:
     m_TexEnvs: []
     m_Ints: []
     m_Floats:
-    - _GridSize: 1
-    - _SurfaceShading: 1
-    - _ShowGrid: 1
+    - _GrainScale: 6
+    - _Variation: 0.28
     m_Colors:
-    - _BaseColor: {r: 0.18, g: 0.25, b: 0.2, a: 1}
-    - _GridColor: {r: 0.45, g: 0.55, b: 0.45, a: 1}
+    - _BaseColor: {r: 0.27, g: 0.35, b: 0.17, a: 1}
+    - _AccentColor: {r: 0.38, g: 0.37, b: 0.23, a: 1}
   m_BuildTextureStacks: []
