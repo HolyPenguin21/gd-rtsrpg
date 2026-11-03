@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace GameDev.RtsRpg
@@ -14,6 +15,54 @@ namespace GameDev.RtsRpg
         public event Action Changed;
         private TerrainBuilder builder;
         private Matrix4x4 matrix;
+
+        // Live occupancy only. The static grid never receives unit blockers or revision churn.
+        internal int TrafficRevision { get; private set; }
+        internal void NotifyTrafficChanged() => TrafficRevision++;
+        private const float BucketSize = 4f;
+        private readonly Dictionary<Vector2Int, List<UnitMovement>> traffic = new();
+        private readonly Stack<List<UnitMovement>> spareBuckets = new();
+
+        private static Vector2Int BucketAt(float x, float z) => new(
+            Mathf.FloorToInt(x / BucketSize), Mathf.FloorToInt(z / BucketSize));
+
+        internal void Register(UnitMovement unit, Vector2 centre)
+        {
+            var key = BucketAt(centre.x, centre.y);
+            if (key == unit.Bucket && traffic.TryGetValue(key, out var existing) && existing.Contains(unit)) return;
+            Unregister(unit);
+            NotifyTrafficChanged();
+            if (!traffic.TryGetValue(key, out var bucket))
+                traffic.Add(key, bucket = spareBuckets.Count > 0 ? spareBuckets.Pop() : new List<UnitMovement>());
+            bucket.Add(unit);
+            unit.Bucket = key;
+        }
+
+        internal void Unregister(UnitMovement unit)
+        {
+            if (!traffic.TryGetValue(unit.Bucket, out var bucket) || !bucket.Remove(unit)) return;
+            NotifyTrafficChanged();
+            if (bucket.Count != 0) return;
+            traffic.Remove(unit.Bucket);
+            spareBuckets.Push(bucket);
+        }
+
+        internal UnitMovement FindContact(UnitMovement requester, Rect area,
+            bool search = false, bool avoidAllies = false)
+        {
+            // Include the moving footprint and its retained retreat anchor.
+            const float margin = 2.2f;
+            var min = BucketAt(area.xMin - margin, area.yMin - margin);
+            var max = BucketAt(area.xMax + margin, area.yMax + margin);
+            for (int z = min.y; z <= max.y; z++)
+            for (int x = min.x; x <= max.x; x++)
+                if (traffic.TryGetValue(new Vector2Int(x, z), out var bucket))
+                    foreach (var unit in bucket)
+                        if (unit != requester && requester.SharesGrid(unit)
+                            && UnitMovement.Overlaps(area, unit.Occupancy)
+                            && (!search || requester.Avoids(unit, avoidAllies))) return unit;
+            return null;
+        }
 
         private void OnEnable()
         {

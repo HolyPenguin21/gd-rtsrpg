@@ -182,6 +182,18 @@ namespace GameDev.RtsRpg
                     viewCamera, point.ReadValue<Vector2>(), planeHeight, out worldPoint);
         }
 
+        internal bool TryGetCursorRay(out Ray ray, out Vector2 screen)
+        {
+            ray = default;
+            screen = default;
+            if (!isActiveAndEnabled || !Application.isFocused || viewCamera == null
+                || point == null || !point.enabled || point.controls.Count == 0) return false;
+            screen = point.ReadValue<Vector2>();
+            if (!viewCamera.pixelRect.Contains(screen)) return false;
+            ray = viewCamera.ScreenPointToRay(screen);
+            return true;
+        }
+
         public void FrameBounds(Bounds bounds)
         {
             if (viewCamera == null) return;

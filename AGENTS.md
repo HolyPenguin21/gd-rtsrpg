@@ -12,7 +12,7 @@ Read this file before changing any source or Unity scene. This repository is a U
 
 Before implementing anything, inspect the current repository and the real affected code. Never assume a future module already exists because it appears in the roadmap.
 
-## Current baseline (Stage 04 merged; Stage 05 implementation pending review)
+## Current baseline (Stage 05 merged; Stage 05.1 pending review)
 
 - Unity **6000.5.4f1**, URP **17.5.0**.
 - The only scene is `Assets/Scenes/SampleScene.unity`.
@@ -41,4 +41,4 @@ Provide: changed systems and files; why those changes are within scope; dependen
 
 ## Scope reminder
 
-Current Issue #9: Stage 05 large terrain, ramp readability, static navigation integration and path execution. Stage 04 is merged in PR #10. See Docs/Stage05Movement.md for current boundaries and checks. RTS selection/orders, combat, RPG, world map and test infrastructure remain outside this stage.
+Stage 05 is merged in PR #11. Current Issue #12 covers traffic recovery, terrain wall geometry and Follow Mouse for Army (64). Stage 06 starts after Stage 05.1 acceptance. See Docs/Stage05Movement.md for boundaries and manual checks. RTS selection/orders, combat, RPG, world map and test infrastructure remain outside this stage.

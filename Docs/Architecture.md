@@ -4,7 +4,7 @@
 
 ## 1. Baseline — опубликованная основа Unity
 
-Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); Stage 01 принят и объединён через PR #3; ниже фактическое состояние с принятым Stage 02 и объединённым кодом Stage 03 (визуальная приёмка открыта) и объединённым Stage 04 и реализацией Stage 05 в отдельной ветке:
+Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); Stage 01 принят и объединён через PR #3; ниже фактическое состояние с принятым Stage 02 и объединённым кодом Stage 03 (визуальная приёмка открыта) объединёнными Stage 04–05 и реализацией Stage 05.1 на ревью:
 
 - Unity **6000.5.4f1**, Universal Render Pipeline **17.5.0**.
 - `Assets/Scenes/SampleScene.unity` — единственная активная сцена в `ProjectSettings/EditorBuildSettings.asset`. Stage 01 добавляет два реальных класса Camera/Input (см. раздел 7).
@@ -138,7 +138,7 @@
 |---|---|---|
 | `NavigationTypes.cs` | Footprint 1×1/1×2/2×2, pose, request, immutable path points/status, consumable expansion budget | Unity math; path хранит owner + revision для IsCurrent |
 | `NavigationGrid.cs` | Один Surface + снимок localToWorld; счётчики только статических blocker rectangles, handles, revision/event; геометрия, step/turn validity и world sampling | Читает `TerrainSurface.GetCell/GetEdge/IsBoundaryBlocked`; НЕ копирует heightmap и НЕ читает Mesh/Physics |
-| `NavigationPathfinder.cs` | Синхронный bounded 8-neighbour A*, heap, sparse query-local states; прямые шаги 10, диагонали 14, quarter-turn 10 | NavigationGrid, query/shared budget; не меняет Transform |
+| `NavigationPathfinder.cs` | Один bounded 8-neighbour A* с синхронным и покадровым исполнением, heap, sparse query-local states; прямые шаги 10, диагонали 14, quarter-turn 10 | NavigationGrid, query/shared budget; не меняет Transform |
 | `NavigationGroupPlanner.cs` | Один guide spine, corridor ±2, bounded corridor-local paths с fallback, расширение зоны целей и временные footprint reservations | Grid + тот же Pathfinder; reservations только для конечных мест, не live occupancy |
 | `TerrainNavigation.cs` | Единственный navigation component одного Builder; владеет Grid lifetime, retire/rebuild и событием Changed | Builder.SurfaceChanged; LateUpdate лишь сравнивает matrix, перестраивает только при её изменении; маршруты не пересчитывает |
 | `NavigationDemo.cs` | Отключаемая диагностическая панель/линии в SampleScene; явные запросы, presets, blockers, отчёты | TerrainNavigation и существующий material (runtime copy); ручные сценарии, включая демонстрацию Stage 05 |
@@ -156,5 +156,8 @@ Stage 03 объединён через PR #8 (`60cb36f818889515498d2613d2a628fb4
 
 - `ProceduralTerrainGenerator` в режиме Landforms размещает локальные положительные и отрицательные области, фиксирует входы/выходы, затем проверяет связанные площадки и намеренную изоляцию по точным границам одной TerrainSurface.
 - `TerrainMapData` формирует расширенный выход рампы из тех же подъячеек, которые читает NavigationGrid. Верх каждой ячейки остаётся плоскостью. Mesh и world-point используют одинаковые углы; yaw хранится в Transform террейна.
-- `UnitMovement` владеет непрерывным положением, поворотом, ограниченным ожиданием и локальной уступкой. Маршрут передаёт вызывающая сторона. Движение читает один TerrainNavigation/Grid и прекращается по смене snapshot/revision. Динамические контакты живут в Movement, статические blockers — в Navigation.
-- `NavigationDemo` создаёт наглядные юниты и отправляет явные запросы. Камера принимает мировые bounds меша. Сценарии, проверка и ограничения описаны в [Stage05Movement.md](Stage05Movement.md).
+- `UnitMovement` владеет непрерывным положением, поворотом, ожиданием, уступкой и возвратом к якорю после блокировки. `TerrainNavigation` хранит занятые пространственные корзины по 4×4 подъячеек. Координатор передаёт маршруты через `Assign` на фактическом якоре. Смена snapshot останавливает движение, смена revision требует проверки ребра для безопасного возврата. Статические blockers остаются в Grid.
+- `NavigationDemo` владеет демонстрационным составом, конечными резервами и очередью round-robin с общим бюджетом на кадр. Координатор хранит последнюю ожидающую цель наведения и даёт каждому участнику завершить первую попытку назначения текущей команды перед проверкой следующей. `NavigationGroupPlanner` перечисляет допустимые конечные места в связной окрестности цели.
+- `NavigationPathfinder` сохраняет фронт одного запроса между кадрами по запросу демо. Разбиение на кадры применяется к проверке цели и маршрутам участников. Смена ревизии снимает ожидающую работу и удержание юнита в якоре. Динамические контакты по-прежнему передаются в A* через фильтр ребра. Отказ после изменения трафика допускает повтор, а движение проверяет актуальные контакты независимо от результата поиска.
+- `RtsCameraController` отдаёт луч из действующего Input System. `NavigationGrid.TryPickSurface` идёт по пересечённым ячейкам и ищет верхнюю грань по тем же углам TerrainSurface, которые использует Builder. Обновление цели ограничено по времени и смещению курсора.
+- `TerrainBuilder` строит дополнительные скальные грани внутри непроходимого объёма, сужая профиль у поворотов и рамп. Границы стен и геометрия верха остались привязаны к TerrainSurface. Сценарии и ограничения описаны в [Stage05Movement.md](Stage05Movement.md).

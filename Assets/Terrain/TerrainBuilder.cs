@@ -179,20 +179,42 @@ namespace GameDev.RtsRpg
             // overlapping double-sided walls or interpolate a cliff into a walkable top.
             Vector3 p = surface.Position(ax, az, a), q = surface.Position(bx, bz, b);
             Vector3 r = surface.Position(bx, bz, d), t = surface.Position(ax, az, c);
-            // All four boundary edges remain EXACT. An irregular inset centre makes real
-            // stone facets inside the solid rock, never outside into a ramp or a lower top.
-            // Adjacent segments share their untouched perimeter, including ramp tips.
+            // Carve a recessed rock band below the lip. Keep the complete outer
+            // perimeter fixed so the collision top, adjacent faces and ramp tips coincide.
+            bool firstHigh = a > c || b > d;
+            int hx = firstHigh ? x : x + step.x, hz = firstHigh ? z : z + step.y;
+            int lx = firstHigh ? x + step.x : x, lz = firstHigh ? z + step.y : z;
+            var before = step.x == 0 ? TerrainDirection.West : TerrainDirection.South;
+            var after = TerrainSurface.Opposite(before);
+            bool cornerA = IsCorner(before), cornerB = IsCorner(after);
+            bool IsCorner(TerrainDirection direction) =>
+                (surface.Contains(hx, hz) && surface.IsBoundaryBlocked(hx, hz, direction))
+                || (surface.Contains(lx, lz) && surface.IsBoundaryBlocked(lx, lz, direction));
             uint hash = DetailHash(ax, az, bx, bz, surface.DetailSeed);
-            float along = 0.35f + (hash & 255) / 255f * 0.3f;
-            float vertical = 0.28f + ((hash >> 8) & 255) / 255f * 0.4f;
-            Vector3 upper = Vector3.Lerp(p, q, along), lower = Vector3.Lerp(t, r, along);
-            float depth = Mathf.Min(surface.BlockWorldSize / 4f * 0.12f,
-                Mathf.Abs(upper.y - lower.y) * 0.12f);
-            Vector3 centre = Vector3.Lerp(upper, lower, vertical) - outward * depth;
-            Triangle(p, q, centre, outward, vertices, triangles);
-            Triangle(q, r, centre, outward, vertices, triangles);
-            Triangle(r, t, centre, outward, vertices, triangles);
-            Triangle(t, p, centre, outward, vertices, triangles);
+            float u = (cornerA ? 0.32f : 0.23f) + (hash & 255) / 255f * 0.09f;
+            float v = (cornerB ? 0.59f : 0.68f) + ((hash >> 8) & 255) / 255f * 0.09f;
+            Vector3 Profile(float along, float down, float inset)
+            {
+                Vector3 first = Vector3.Lerp(p, q, along), second = Vector3.Lerp(t, r, along);
+                Vector3 upper = first.y > second.y ? first : second;
+                Vector3 lower = first.y > second.y ? second : first;
+                float depth = Mathf.Min(surface.BlockWorldSize * 0.065f, (upper.y - lower.y) * 0.22f);
+                // Keep a face inside its corner wedge so recessed perpendicular
+                // faces cannot intersect at an outside turn.
+                depth = Mathf.Min(depth, surface.BlockWorldSize * 0.125f * Mathf.Min(along, 1f - along));
+                return Vector3.Lerp(upper, lower, down) - outward * (depth * inset);
+            }
+
+            Vector3 upperA = firstHigh ? p : t, upperB = firstHigh ? q : r;
+            Vector3 lowerA = firstHigh ? t : p, lowerB = firstHigh ? r : q;
+            // At shoulders the lower band narrows continuously into the ramp tip.
+            Vector3 leftLip = Profile(u, 0.20f, 0.72f), rightLip = Profile(v, 0.25f, 0.83f);
+            Vector3 leftBase = Profile(u, 0.72f, 1f), rightBase = Profile(v, 0.79f, 0.76f);
+            Quad(upperA, upperB, rightLip, leftLip, outward, vertices, triangles);
+            Quad(leftLip, rightLip, rightBase, leftBase, outward, vertices, triangles);
+            Quad(leftBase, rightBase, lowerB, lowerA, outward, vertices, triangles);
+            Quad(upperA, leftLip, leftBase, lowerA, outward, vertices, triangles);
+            Quad(upperB, rightLip, rightBase, lowerB, outward, vertices, triangles);
         }
 
         private static uint DetailHash(int ax, int az, int bx, int bz, int seed)

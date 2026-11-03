@@ -67,6 +67,64 @@ namespace GameDev.RtsRpg
             cell = new Vector2Int((int)x, (int)z); return true;
         }
 
+        // Traverse only cells crossed by the ray, in front-to-back order. The same
+        // planar corner heights define both the mesh top and WorldPoint.
+        internal bool TryPickSurface(Ray ray, out Vector2Int cell)
+        {
+            cell = default;
+            if (!IsAlive) return false;
+            float scale = 4f / Surface.BlockWorldSize;
+            Vector3 origin = worldToLocal.MultiplyPoint3x4(ray.origin);
+            Vector3 direction = worldToLocal.MultiplyVector(ray.direction);
+            float ox = origin.x * scale, oz = origin.z * scale;
+            float dx = direction.x * scale, dz = direction.z * scale;
+            float enter = 0f, exit = float.PositiveInfinity;
+            if (!Clip(ox, dx, Surface.CellsX, ref enter, ref exit)
+                || !Clip(oz, dz, Surface.CellsZ, ref enter, ref exit)) return false;
+
+            int x = Mathf.Clamp(Mathf.FloorToInt(ox + enter * dx), 0, Surface.CellsX - 1);
+            int z = Mathf.Clamp(Mathf.FloorToInt(oz + enter * dz), 0, Surface.CellsZ - 1);
+            int stepX = Math.Sign(dx), stepZ = Math.Sign(dz);
+            float heightScale = Surface.HeightStepWorld * 0.25f;
+            while (Surface.Contains(x, z))
+            {
+                float tx = stepX == 0 ? float.PositiveInfinity : (x + (stepX > 0 ? 1 : 0) - ox) / dx;
+                float tz = stepZ == 0 ? float.PositiveInfinity : (z + (stepZ > 0 ? 1 : 0) - oz) / dz;
+                float leave = Mathf.Min(exit, Mathf.Min(tx, tz));
+                var top = Surface.GetCell(x, z);
+                float h = top.Corner(0, 0) * heightScale;
+                float sx = (top.Corner(1, 0) - top.Corner(0, 0)) * heightScale;
+                float sz = (top.Corner(0, 1) - top.Corner(0, 0)) * heightScale;
+                float slope = direction.y - sx * dx - sz * dz;
+                if (slope < -0.000001f)
+                {
+                    float hit = (h + sx * (ox - x) + sz * (oz - z) - origin.y) / slope;
+                    if (hit >= enter - 0.0001f && hit <= leave + 0.0001f)
+                    {
+                        cell = new Vector2Int(x, z);
+                        return true;
+                    }
+                    // A near-side cliff hides the lower surface behind it. Reject the
+                    // cliff face instead of picking unrelated ground through the rock.
+                    if (hit < enter - 0.0001f) return false;
+                }
+                if (leave >= exit) break;
+                if (tx <= tz) x += stepX;
+                if (tz <= tx) z += stepZ;
+                enter = leave;
+            }
+            return false;
+        }
+
+        private static bool Clip(float origin, float direction, int bound, ref float enter, ref float exit)
+        {
+            if (direction == 0f) return origin >= 0f && origin <= bound;
+            float a = -origin / direction, b = (bound - origin) / direction;
+            enter = Mathf.Max(enter, Mathf.Min(a, b));
+            exit = Mathf.Min(exit, Mathf.Max(a, b));
+            return enter <= exit;
+        }
+
         public Vector3 WorldPoint(float cellX, float cellZ)
         {
             if (!IsAlive || !Finite(cellX) || !Finite(cellZ) || cellX < 0 || cellZ < 0

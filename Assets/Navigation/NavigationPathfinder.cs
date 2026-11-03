@@ -16,20 +16,77 @@ namespace GameDev.RtsRpg
         public NavigationPath Find(NavigationRequest request, NavigationBudget budget = null) => Find(request, budget, null);
 
         // Group local pass can restrict the corridor; its fallback uses the same solver unrestricted.
-        internal NavigationPath Find(NavigationRequest request, NavigationBudget budget, HashSet<Vector2Int> corridor, bool restrictToCorridor = false)
+        internal NavigationPath Find(NavigationRequest request, NavigationBudget budget, HashSet<Vector2Int> corridor, bool restrictToCorridor = false,
+            Func<NavigationPose, NavigationPose, bool> allowsEdge = null)
+            => new Search(this, request, corridor, restrictToCorridor, allowsEdge, sliced: false)
+                .Advance(budget ?? new NavigationBudget(request.MaxExpanded));
+
+        internal Search BeginSearch(NavigationRequest request, HashSet<Vector2Int> corridor = null,
+            Func<NavigationPose, NavigationPose, bool> allowsEdge = null)
+            => new Search(this, request, corridor, false, allowsEdge, sliced: true);
+
+        internal sealed class Search
+        {
+            private readonly NavigationGrid grid;
+            private readonly int revision;
+            private IEnumerator<NavigationPath> work;
+            private NavigationPath result;
+            internal NavigationBudget Budget { get; private set; }
+
+            internal Search(NavigationPathfinder finder, NavigationRequest request, HashSet<Vector2Int> corridor,
+                bool restrictToCorridor, Func<NavigationPose, NavigationPose, bool> allowsEdge, bool sliced)
+            {
+                grid = finder.grid;
+                revision = grid.Revision;
+                work = finder.Solve(this, request, corridor, restrictToCorridor, allowsEdge, sliced);
+            }
+
+            // A null result means the frontier is suspended, not exhausted.
+            internal NavigationPath Advance(NavigationBudget budget)
+            {
+                if (work == null) return result;
+                if (!grid.IsAlive || revision != grid.Revision)
+                    result = new NavigationPath(grid, NavigationStatus.Stale, "Navigation changed during search.");
+                else
+                {
+                    Budget = budget;
+                    work.MoveNext();
+                    result = work.Current;
+                }
+                if (result != null)
+                {
+                    work.Dispose();
+                    work = null;
+                }
+                return result;
+            }
+        }
+
+        private IEnumerator<NavigationPath> Solve(Search search, NavigationRequest request,
+            HashSet<Vector2Int> corridor, bool restrictToCorridor,
+            Func<NavigationPose, NavigationPose, bool> allowsEdge, bool sliced)
         {
             NavigationPath Fail(NavigationStatus s, string reason) => new NavigationPath(grid, s, reason);
-            if (!grid.IsAlive) return Fail(NavigationStatus.Stale, "Terrain snapshot was retired; rebuild navigation and replan explicitly.");
             if (!request.Footprint.IsValid || (uint)request.Start.Facing > 3 || (uint)request.Goal.Facing > 3
                 || request.MaxExpanded < 1 || request.MaxExpanded > 1000000)
-                return Fail(NavigationStatus.InvalidRequest, "Supported footprints: 1x1, 1x2, 2x2; facing N/E/S/W; budget 1..1000000.");
+            {
+                yield return Fail(NavigationStatus.InvalidRequest, "Supported footprints: 1x1, 1x2, 2x2; facing N/E/S/W; budget 1..1000000.");
+                yield break;
+            }
             var footprint = request.Footprint;
             // A square has no geometric orientation state; all its output poses use canonical North.
             NavigationPose Canonical(NavigationPose p) => footprint.NeedsTurns ? p : new NavigationPose(p.Cell);
             NavigationPose start = Canonical(request.Start), goal = Canonical(request.Goal);
-            if (!grid.CanOccupy(start, footprint)) return Fail(NavigationStatus.InvalidStart, "Start footprint is outside, blocked or straddles a cliff.");
-            if (!grid.CanOccupy(goal, footprint)) return Fail(NavigationStatus.InvalidGoal, "Goal footprint is outside, blocked or straddles a cliff.");
-            budget = budget ?? new NavigationBudget(request.MaxExpanded);
+            if (!grid.CanOccupy(start, footprint))
+            {
+                yield return Fail(NavigationStatus.InvalidStart, "Start footprint is outside, blocked or straddles a cliff.");
+                yield break;
+            }
+            if (!grid.CanOccupy(goal, footprint))
+            {
+                yield return Fail(NavigationStatus.InvalidGoal, "Goal footprint is outside, blocked or straddles a cliff.");
+                yield break;
+            }
             var nodes = new Dictionary<NavigationPose, Node>();
             var open = new Heap();
             int Heuristic(NavigationPose p)
@@ -51,7 +108,9 @@ namespace GameDev.RtsRpg
                 if (current.Closed || current.Cost != entry.Cost) continue;
                 // Reaching the goal needs no expansion, including start == goal at zero shared budget.
                 if (entry.Pose.Equals(goal)) { best = goal; found = true; break; }
-                if (expanded >= request.MaxExpanded || !budget.Take()) { exhausted = true; break; }
+                if (expanded >= request.MaxExpanded) { exhausted = true; break; }
+                while (sliced && search.Budget.Remaining == 0) yield return null;
+                if (!search.Budget.Take()) { exhausted = true; break; }
                 current.Closed = true; expanded++;
                 int h = Heuristic(entry.Pose);
                 if (h < bestH) { bestH = h; best = entry.Pose; }
@@ -66,20 +125,25 @@ namespace GameDev.RtsRpg
                 foreach (var step in Steps)
                 {
                     var next = new NavigationPose(entry.Pose.Cell + step, entry.Pose.Facing);
-                    if ((!restrictToCorridor || corridor.Contains(next.Cell)) && grid.CanStep(entry.Pose, next, footprint)) Relax(next, step.x != 0 && step.y != 0 ? 14 : 10);
+                    if ((!restrictToCorridor || corridor.Contains(next.Cell)) && grid.CanStep(entry.Pose, next, footprint)
+                        && (allowsEdge == null || allowsEdge(entry.Pose, next))) Relax(next, step.x != 0 && step.y != 0 ? 14 : 10);
                 }
                 if (footprint.NeedsTurns)
                 for (int turn = -1; turn <= 1; turn += 2)
                 {
                     var next = new NavigationPose(entry.Pose.Cell, (TerrainDirection)(((int)entry.Pose.Facing + turn + 4) % 4));
-                    if (grid.CanTurn(entry.Pose, next, footprint)) Relax(next, 10);
+                    if (grid.CanTurn(entry.Pose, next, footprint)
+                        && (allowsEdge == null || allowsEdge(entry.Pose, next))) Relax(next, 10);
                 }
             }
             NavigationStatus status = found ? NavigationStatus.Success : exhausted ? NavigationStatus.BudgetExceeded : NavigationStatus.NoPath;
             string reason = found ? "Reached exact goal footprint and orientation." : exhausted
                 ? "Expansion cap reached; retry explicitly with a larger budget." : "No route for this footprint and orientation.";
             if (!found && (!request.AllowPartial || best.Equals(start)))
-                return new NavigationPath(grid, status, reason, expanded: expanded);
+            {
+                yield return new NavigationPath(grid, status, reason, expanded: expanded);
+                yield break;
+            }
             if (!found) { status = NavigationStatus.Partial; reason += " Partial path ends at the closest expanded state, not at the goal."; }
             var poses = new List<NavigationPose>();
             NavigationPose cursor = best;
@@ -93,7 +157,7 @@ namespace GameDev.RtsRpg
             poses.Reverse();
             var points = new List<NavigationPoint>(poses.Count);
             foreach (var pose in poses) points.Add(grid.Point(pose, footprint));
-            return new NavigationPath(grid, status, reason, points, expanded, nodes[best].Cost);
+            yield return new NavigationPath(grid, status, reason, points, expanded, nodes[best].Cost);
         }
 
         private sealed class Node
