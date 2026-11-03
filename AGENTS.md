@@ -12,12 +12,13 @@ Read this file before changing any source or Unity scene. This repository is a U
 
 Before implementing anything, inspect the current repository and the real affected code. Never assume a future module already exists because it appears in the roadmap.
 
-## Current baseline (Stage 00.1 merged; Stage 01 pending acceptance)
+## Current baseline (Stage 01 merged; Stage 02 pending review)
 
 - Unity **6000.5.4f1**, URP **17.5.0**.
 - The only scene is `Assets/Scenes/SampleScene.unity`.
 - `Assets/Camera/RtsCameraController.cs` owns the camera; `CursorWorldProjection.cs` owns stateless mathematical plane picking. `Assets/TutorialInfo` remains Unity template support.
-- SampleScene now has the Stage 01 orthographic camera, a temporary reference Plane and cursor marker. The existing Input Actions asset has a Camera map; original Player/UI template maps are preserved. Stage 01 awaits manager acceptance; Unity checks are NOT RUN here.
+- Stage 01 was accepted and merged in PR #3. Its camera/Input and plane projection are preserved.
+- `Assets/Terrain/` owns Stage 02: TerrainMapData (authored input/validation), TerrainSurface (immutable 4x4 geometry), TerrainBuilder (single mesh and lifetime). SampleScene references DemoTerrain; old Plane and cursor marker are disabled. Stage 02 awaits review; Unity checks are NOT RUN here.
 
 ## Mandatory rules
 
@@ -40,4 +41,4 @@ Provide: changed systems and files; why those changes are within scope; dependen
 
 ## Scope reminder
 
-Stage 01 = orthographic RTS camera, camera input, smooth bounded zoom, cursor-to-world. No unit selection, A*, terrain generation, combat, RPG, save systems or RTS base economy until their own stages.
+Stage 02 = explicit terrain data, static mesh, cliffs, variable-width ramps and static geometric boundary information. No procedural generation, terrain picking, unit selection, A*, movement, combat, RPG, save systems or RTS base economy until their own stages.

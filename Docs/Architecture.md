@@ -4,11 +4,11 @@
 
 ## 1. Baseline — опубликованная основа Unity
 
-Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); ниже фактическое состояние с реализацией Stage 01, ожидающей приёмки:
+Основа опубликована в PR #1 (`bootstrap/00.1-unity-project`); Stage 01 принят и объединён через PR #3; ниже фактическое состояние с реализацией Stage 02, ожидающей ревью:
 
 - Unity **6000.5.4f1**, Universal Render Pipeline **17.5.0**.
 - `Assets/Scenes/SampleScene.unity` — единственная активная сцена в `ProjectSettings/EditorBuildSettings.asset`. Stage 01 добавляет два реальных класса Camera/Input (см. раздел 7).
-- Stage 00.1 принят: PR #1 объединён в `main` (`38e28055d0ab9cf2968adebaa5d8e0fc7e736782`). В Stage 01 камера сцены переведена в **orthographic**, наклон 45°, reference XZ=(0,0), высота 25, size=12. Stage 01 ожидает менеджерской приёмки.
+- Stage 00.1 принят: PR #1 объединён в `main` (`38e28055d0ab9cf2968adebaa5d8e0fc7e736782`). В Stage 01 камера сцены переведена в **orthographic**, наклон 45°, reference XZ=(0,0), высота 25, size=12. Stage 01 принят: PR #3 объединён в `main` (`a09007cb2d697c949d7725a1dc700d358342a0e0`).
 - `Assets/InputSystem_Actions.inputactions` сохранён с исходными картами `Player`/`UI` и их GUID; в этот же asset добавлена карта `Camera` (Pan, Zoom, Drag, Point). Её раскладка — локальный стандарт Issue #2, не контракт управления будущих стадий.
 - `Assets/Settings/*` содержит URP-asset, renderer и volume. `Assets/TutorialInfo/*` содержит учебные Readme/Editor скрипты Unity, а не игровой код.
 - `Packages/manifest.json`: Input System **1.19.0**, URP **17.5.0**. Также в составе стандартного шаблона есть AI Navigation **2.0.13** и Test Framework **1.7.0**. Присутствие пакета **не разрешает** применять NavMesh или создавать тесты.
@@ -82,10 +82,14 @@
 | `Assets/Camera/RtsCameraController.cs` | Единственный владелец ground reference XZ, pan velocity, target/current orthographic size и настроек камеры; включает локальную копию только карты Camera, освобождает её при уничтожении; скрывает debug marker при невалидном picking/disable | Camera на том же GameObject, Input System, существующий InputActionAsset, CursorWorldProjection; будущие RTS Controls могут вызывать `TryGetCursorWorldPoint(out Vector3)` |
 | `Assets/Camera/CursorWorldProjection.cs` | Stateless `TryGetCursorWorldPoint(Camera, Vector2, float, out Vector3)`: screen ray → горизонтальная математическая плоскость; при невалидных данных, экране вне pixelRect, параллельном луче или отрицательном расстоянии возвращает false и default output | Только Unity Camera/Plane/Vector; не знает Input, Physics, terrain и менеджеров; используется камерой и доступен будущим controls |
 | `Assets/InputSystem_Actions.inputactions` | Карта Camera: нормализуемый Pan (WASD/стрелки), Zoom (scroll/y), Drag (MMB), Point (mouse position); исходные Player/UI неизменны | Controller читает локальную копию Camera; source asset остаётся Project-wide Actions, другие карты контроллер не переключает |
-| `Assets/Scenes/SampleScene.unity` | Существующая ортографическая камера с controller и ссылками; свет/URP camera data/volume сохранены; один временный Plane и отдельный debug marker без коллайдеров | Ссылки на Input Actions, скрипт, preview materials; стартовая сцена в build settings сохранена |
-| `Assets/Camera/Preview/*` | Один простой URP unlit shader, два материала: сетка временной плоскости и цвет маркера; только ручная проверка камеры | Нет C#-классов, генерации mesh, физических запросов или terrain-модели |
+| `Assets/Scenes/SampleScene.unity` | Существующая ортографическая камера с controller и ссылками; свет/URP camera data/volume сохранены; один Terrain Builder с явной картой; временный Plane отключён, debug marker отключён через showCursorMarker | Ссылки на Input Actions, скрипт, preview materials; стартовая сцена в build settings сохранена |
+| `Assets/Camera/Preview/*` | Один простой URP unlit shader, два прежних материала; shader получил opt-in `_SurfaceShading` (по умолчанию 0), используемый материалом terrain для читаемости уступов | Нет C#-классов, генерации mesh, физических запросов или terrain-модели |
+| `Assets/Terrain/TerrainMapData.cs` (`TerrainMapData`, `TerrainRamp`, `TerrainDirection`) | ScriptableObject: размеры, уровни row-major, масштаб, явные рампы; CreateSurface валидирует исходные данные и создаёт отдельный неизменяемый снимок | UnityEngine/System; не знает mesh, Input, Physics и навигацию |
+| `Assets/Terrain/TerrainSurface.cs` (`TerrainSurface`, вложенный `Cell`) | 4×4 области на блок, целочисленные четверти уровня в углах, номер/ориентация рампы, профили граней и геометрически непроходимые границы | Только Unity math; читается Builder; будущая Navigation должна отдельно решать footprint/диагонали/занятость |
+| `Assets/Terrain/TerrainBuilder.cs` (`TerrainBuilder`) | Строит один mesh из TerrainSurface, один верх на подячейку, вертикальные стенки на разрывах и по периметру; владеет жизненным циклом mesh | TerrainMapData/Surface, MeshFilter/MeshRenderer; OnEnable или явный Rebuild; нет Update, collider, Physics и picking |
+| `Assets/Terrain/DemoTerrain.asset`, `TerrainPreview.mat` | Явная карта 6×5, уровни 0/1/2, рампы 1/4/3 подячейки; простой URP preview | Данные карты отделены от mesh; материал использует существующий preview shader |
 | `Assets/Settings/*`, `Assets/TutorialInfo/*` | Исходные URP assets и поддержка Unity tutorial | Сохранены без изменений |
-| Terrain, units, navigation, combat и следующие Stage | **Не реализовано** | Не создавать потребителей заранее |
+| Units, navigation, combat и следующие Stage | **Не реализовано** | Не создавать потребителей заранее |
 
 ### Stage 01: фактические правила
 
@@ -97,6 +101,16 @@
 - Числа камеры, размер/сетка контрольной плоскости — редактируемые значения для Stage 01, **не** размер блока или контракт будущей карты. Точка picking может быть за краями конечного Plane: математическая плоскость бесконечна.
 - Ввод и pose применяются в LateUpdate; дальнейшим потребителям нужны текущая Camera и свежий вызов picking после обновления камеры, а не сохранённая координата прошлого кадра.
 - Полная таблица Inspector-настроек и честный статус проверок: [Stage01Camera.md](Stage01Camera.md).
+
+### Stage 02: фактические правила
+
+- Рампа занимает прямоугольную полосу на нижнем блоке L длиной один блок; поднимается к соседу L+1. Позади требуется сосед L. Старт/ширина полосы дискретны по 4 подячейкам. Соседние уровни без рамп могут отличаться на несколько шагов — это отвесный уступ.
+- Валидация отклоняет неверные размеры, длину данных, масштаб/переполнение координат, выходы, несовместимые уровни, наложения рамп, разрывы входа/выхода и пересекающиеся профили стыков. Данные не исправляются. CreateSurface бросает ArgumentException; Builder выводит понятное сообщение и удаляет устаревший mesh.
+- Mesh и сведения о границах используют одни целочисленные профили TerrainSurface. Каждая общая грань обрабатывается один раз, равные профили не создают стенку. Боковина рампы с совпадающим концом сводится к треугольнику без вырожденной грани.
+- Вершины на границах совпадают по координатам; нормали граней раздельные для резких уступов. Наружные стенки доходят до уровня на один шаг ниже минимума. Дно не строится.
+- TerrainSurface возвращает локальные координаты mesh. В демо Transform = translation (-12,0,-10), rotation identity, scale (1,1,1). Для world point потребитель должен применить TransformPoint; сведения о поверхности не являются screen picking.
+- Камера и Input не менялись. Plane отключён и showCursorMarker=false; математическая проекция Y=planeHeight остаётся прежней, в том числе для MMB drag. Настоящий terrain picking не реализован.
+- Детали формата, ограничений и ручной проверки: [Stage02Terrain.md](Stage02Terrain.md). Stage 02 реализован в исходниках, не принят; Unity проверки NOT RUN.
 
 ## 8. Контроль изменений, качества и архитектуры
 

@@ -37,11 +37,11 @@ PR: https://github.com/HolyPenguin21/gd-rtsrpg/pull/1 — объединён, co
 
 Условия закрытия Bootstrap: исходники, Packages и ProjectSettings опубликованы; добавлены GDD, Decisions, Architecture, ImplementationPlan, WorkingAgreement, AGENTS; проведён аудит PR, явно перечислены неисполненные проверки. Создавать новый проект вместо локального запрещено.
 
-## Stage 01 — реализован, ожидает ревью и приёмки
+## Stage 01 — принят и объединён
 
 Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/2
 
-В исходниках реализованы `RtsCameraController`, `CursorWorldProjection`, карта Camera в существующем Input Actions, интеграция с SampleScene и минимальная плоскость/маркер. Документация фактической архитектуры обновлена. Слияние только после менеджерской приёмки. Статическая проверка проведена; Unity import, C# / shader compilation и все Play Mode smoke checks — **NOT RUN**, редактор отсутствует. Детали: [Stage01Camera.md](Stage01Camera.md).
+В исходниках реализованы `RtsCameraController`, `CursorWorldProjection`, карта Camera в существующем Input Actions, интеграция с SampleScene и минимальная плоскость/маркер. Документация фактической архитектуры обновлена. PR #3 объединён в `main`, commit `a09007cb2d697c949d7725a1dc700d358342a0e0`. Статическая проверка проведена; Unity import, C# / shader compilation и все Play Mode smoke checks — **NOT RUN**, редактор отсутствует. Детали: [Stage01Camera.md](Stage01Camera.md).
 
 **Цель:** можно перемещать и масштабировать ортографическую RTS-камеру, а игровая логика получает корректную точку курсора в мировых координатах для будущих команд.
 
@@ -61,9 +61,13 @@ Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/2
 
 **Не входит:** выделение, unit movement, A*, terrain mesh, procedural maps, combat, RPG, automated tests, ECS/Burst и инфраструктура «на будущее».
 
-## Stage 02 — следующий за 01
+## Stage 02 — реализован, ожидает менеджерского ревью
 
-Terrain Builder принимает явные данные о блоках, высотах и рампах и строит единый корректный рельеф. Проверить стыковку блоков, переход высот только по рампе, ровные площадки для строительства и отсутствие многоуровневых поверхностей. Физические размеры блоков нужно согласовать перед Issue. Нет случайных карт и A*.
+Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/4
+
+Добавлены TerrainMapData, TerrainSurface и TerrainBuilder: явные уровни/рампы, валидация, снимок 4×4 областей на блок, единый mesh с уступами и рампами переменной ширины. SampleScene использует DemoTerrain 6×5 с рампами 1/3/4 подячейки; старый Plane и маркер отключены. Размер блока 4 и шаг 2 — только редактируемые демонстрационные значения, не утверждённый мировой стандарт.
+
+Документация фактической архитектуры обновлена. Статический аудит выполнен; Unity import, C#/shader compilation, открытие сцены и Play Mode — **NOT RUN**, редактор отсутствует. Процедура ручной приёмки: [Stage02Terrain.md](Stage02Terrain.md). Слияние только после ревью. Нет случайных карт, A*, автотестов или инфраструктуры следующих стадий.
 
 ## Stage 03 — следующий за 02
 
