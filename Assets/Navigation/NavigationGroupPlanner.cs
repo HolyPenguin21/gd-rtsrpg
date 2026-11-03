@@ -110,7 +110,10 @@ namespace GameDev.RtsRpg
                         int before = budget.Remaining;
                         if (corridor.Contains(member.Start.Cell) && corridor.Contains(goal.Cell))
                         {
-                            path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, memberRemaining), budget, corridor, true);
+                            int corridorBudget = Math.Min(memberRemaining, budget.Remaining) / 3;
+                            if (corridorBudget > 0)
+                                path = finder.Find(new NavigationRequest(member.Start, goal, member.Footprint, corridorBudget),
+                                    budget, corridor, true);
                             memberRemaining -= before - budget.Remaining;
                         }
                         if ((path == null || path.Status != NavigationStatus.Success) && memberRemaining > 0 && budget.Remaining > 0)

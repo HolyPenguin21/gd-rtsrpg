@@ -9,6 +9,7 @@ namespace GameDev.RtsRpg
     public sealed class TerrainNavigation : MonoBehaviour
     {
         public NavigationGrid Grid { get; private set; }
+        public bool HasCurrentTransform => builder != null && builder.transform.localToWorldMatrix == matrix;
         public string Error { get; private set; }
         public event Action Changed;
         private TerrainBuilder builder;

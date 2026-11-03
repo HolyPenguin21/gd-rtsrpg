@@ -54,6 +54,7 @@ namespace GameDev.RtsRpg
     public sealed class NavigationPath
     {
         private readonly NavigationGrid owner;
+        internal bool BelongsTo(NavigationGrid grid) => ReferenceEquals(owner, grid);
         public int Revision { get; }
         public bool IsCurrent => owner.IsAlive && Revision == owner.Revision;
         public NavigationStatus Status { get; }

@@ -15,6 +15,8 @@ namespace GameDev.RtsRpg
         public int widthSubcells;
         [Tooltip("Fill the rest of this block at L+1: a cut through rock, not a raised ribbon. Legacy default is false.")]
         public bool cutIntoCliff;
+        [Tooltip("Widen by one subcell on either side at the upper landing.")]
+        public bool flareExit;
     }
 
     /// <summary>Authored input, independent of meshes. CreateSurface validates and copies it.</summary>
@@ -35,7 +37,7 @@ namespace GameDev.RtsRpg
         /// <summary>Runtime input uses the SAME validation and immutable snapshot as authored assets.
         /// Arrays are consumed immediately, never retained or written to.</summary>
         public static TerrainSurface CreateSurface(int width, int length, float blockWorldSize,
-            float heightStepWorld, int[] levels, TerrainRamp[] ramps, int detailSeed = 0)
+            float heightStepWorld, int[] levels, TerrainRamp[] ramps, int detailSeed = 0, Vector2Int[] landmarks = null)
         {
             if (width <= 0 || length <= 0 || (long)width * length > int.MaxValue / 16)
                 throw new ArgumentException("Terrain: dimensions must be positive and fit the 4x4 surface array.");
@@ -76,6 +78,9 @@ namespace GameDev.RtsRpg
                 if (ramp.startSubcell < 0 || ramp.widthSubcells < 1 || ramp.widthSubcells > 4
                     || ramp.startSubcell > 4 - ramp.widthSubcells)
                     throw new ArgumentException(prefix + "width must be 1..4 and start + width <= 4.");
+                if (ramp.flareExit && (!ramp.cutIntoCliff || ramp.startSubcell < 1
+                    || ramp.startSubcell + ramp.widthSubcells > 3))
+                    throw new ArgumentException(prefix + "a flared exit needs a cliff cut with room on both sides.");
                 Vector2Int step = TerrainSurface.Step(ramp.uphill);
                 Vector2Int upper = ramp.block + step, lower = ramp.block - step;
                 if (!Inside(upper.x, upper.y, width, length) || !Inside(lower.x, lower.y, width, length))
@@ -95,7 +100,11 @@ namespace GameDev.RtsRpg
                 {
                     bool northSouth = ramp.uphill == TerrainDirection.North || ramp.uphill == TerrainDirection.South;
                     int across = northSouth ? x : z;
-                    bool inLane = across >= ramp.startSubcell && across < ramp.startSubcell + ramp.widthSubcells;
+                    int depth = ramp.uphill == TerrainDirection.North ? z : ramp.uphill == TerrainDirection.South
+                        ? 3 - z : ramp.uphill == TerrainDirection.East ? x : 3 - x;
+                    int flare = ramp.flareExit && depth >= 2 ? 1 : 0;
+                    bool inLane = across >= ramp.startSubcell - flare
+                        && across < ramp.startSubcell + ramp.widthSubcells + flare;
                     int index = ramp.block.x * 4 + x + (ramp.block.y * 4 + z) * cellsX;
                     if (!inLane)
                     {
@@ -110,7 +119,7 @@ namespace GameDev.RtsRpg
             }
 
             var surface = new TerrainSurface(cellsX, cellsZ, blockWorldSize, heightStepWorld,
-                (minimum - 1) * 4, cells, detailSeed);
+                (minimum - 1) * 4, cells, detailSeed, landmarks);
             // Validate the actual entry/exit profiles after ALL ramps have been applied.
             for (int z = 0; z < cellsZ; z++)
             for (int x = 0; x < cellsX; x++)
@@ -121,7 +130,16 @@ namespace GameDev.RtsRpg
                     var direction = (TerrainDirection)d;
                     if (cell.IsRamp && (direction == cell.Uphill || direction == TerrainSurface.Opposite(cell.Uphill)))
                     {
-                        if (surface.IsBoundaryBlocked(x, z, direction))
+                        Vector2Int neighbor = new Vector2Int(x, z) + TerrainSurface.Step(direction);
+                        int across = cell.Uphill == TerrainDirection.North || cell.Uphill == TerrainDirection.South
+                            ? x % 4 : z % 4;
+                        TerrainRamp ramp = definitions[cell.RampIndex];
+                        bool flareShoulder = ramp.flareExit && direction != cell.Uphill
+                            && (across < ramp.startSubcell || across >= ramp.startSubcell + ramp.widthSubcells)
+                            && surface.Contains(neighbor.x, neighbor.y)
+                            && !surface.GetCell(neighbor.x, neighbor.y).IsRamp
+                            && surface.GetCell(neighbor.x, neighbor.y).Level == cell.Level + 1;
+                        if (!flareShoulder && surface.IsBoundaryBlocked(x, z, direction))
                             throw new ArgumentException($"Terrain ramp {cell.RampIndex}: discontinuous entry/exit at subcell ({x},{z}).");
                     }
                     if (cell.IsRamp && definitions[cell.RampIndex].cutIntoCliff
