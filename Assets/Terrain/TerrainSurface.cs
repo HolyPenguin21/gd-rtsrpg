@@ -49,11 +49,13 @@ namespace GameDev.RtsRpg
         public float HeightStepWorld { get; }
         public int BaseQuarterLevel { get; }
         public int DetailSeed { get; }
+        public System.Collections.Generic.IReadOnlyList<Vector2Int> Landmarks { get; }
 
-        internal TerrainSurface(int x, int z, float blockSize, float heightStep, int baseHeight, Cell[] data, int detailSeed)
+        internal TerrainSurface(int x, int z, float blockSize, float heightStep, int baseHeight, Cell[] data, int detailSeed, Vector2Int[] landmarks)
         {
             CellsX = x; CellsZ = z; BlockWorldSize = blockSize; HeightStepWorld = heightStep;
             BaseQuarterLevel = baseHeight; cells = data; DetailSeed = detailSeed;
+            Landmarks = Array.AsReadOnly(landmarks == null ? Array.Empty<Vector2Int>() : (Vector2Int[])landmarks.Clone());
         }
 
         public bool Contains(int x, int z) => x >= 0 && z >= 0 && x < CellsX && z < CellsZ;

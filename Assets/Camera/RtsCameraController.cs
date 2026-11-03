@@ -182,6 +182,26 @@ namespace GameDev.RtsRpg
                     viewCamera, point.ReadValue<Vector2>(), planeHeight, out worldPoint);
         }
 
+        public void FrameBounds(Bounds bounds)
+        {
+            if (viewCamera == null) return;
+            panBounds = Rect.MinMaxRect(bounds.min.x, bounds.min.z, bounds.max.x, bounds.max.z);
+            groundPosition = new Vector2(bounds.center.x, bounds.center.z);
+            planeHeight = bounds.center.y;
+            float radians = tilt * Mathf.Deg2Rad;
+            float projectedHalfHeight = bounds.extents.z * Mathf.Sin(radians)
+                + bounds.extents.y * Mathf.Cos(radians);
+            targetZoom = maxZoom = Mathf.Max(minZoom, 1.08f * Mathf.Max(projectedHalfHeight,
+                bounds.extents.x / Mathf.Max(0.1f, viewCamera.aspect)));
+            cameraHeight = Mathf.Max(25f, bounds.extents.y + (bounds.extents.z * 2f + 2f)
+                * Mathf.Sin(radians) * Mathf.Cos(radians) + 2f);
+            viewCamera.farClipPlane = Mathf.Max(viewCamera.farClipPlane,
+                cameraHeight / Mathf.Sin(radians) + bounds.size.magnitude);
+            viewCamera.orthographicSize = targetZoom;
+            ResetMotion();
+            ApplyPose();
+        }
+
         private void ApplyPose()
         {
             viewCamera.orthographic = true;

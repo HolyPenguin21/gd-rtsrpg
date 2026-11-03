@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace GameDev.RtsRpg
 {
-    /// <summary>Stage 04 debug display only. No units, click picking, RTS input or gameplay commands.</summary>
+    /// <summary>Manual terrain, navigation and movement scenarios. No RTS commands.</summary>
     [DisallowMultipleComponent]
     [RequireComponent(typeof(TerrainNavigation))]
     public sealed class NavigationDemo : MonoBehaviour
@@ -17,7 +17,12 @@ namespace GameDev.RtsRpg
         [SerializeField] private bool allowPartial;
         [SerializeField] private int maxExpanded = 20000;
         [SerializeField, Range(0, 32)] private int groupRadius = 12;
-        [SerializeField] private bool showBoundaries = true;
+        [SerializeField] private bool showBoundaries;
+        [SerializeField] private RtsCameraController terrainCamera;
+        private readonly List<UnitMovement> units = new List<UnitMovement>();
+        private bool movementDemo, armyDemo;
+        private bool blockerEnabled;
+        private NavigationGrid blockerGrid;
         [SerializeField] private bool showPanel = true;
         [SerializeField] private RectInt blocker = new RectInt(12, 4, 4, 4);
         private TerrainNavigation navigation;
@@ -35,13 +40,20 @@ namespace GameDev.RtsRpg
         {
             navigation = GetComponent<TerrainNavigation>(); builder = GetComponent<TerrainBuilder>();
             navigation.Changed += Invalidate;
+            builder.SurfaceChanged += FrameTerrain;
             if (lineMaterial != null) ownedMaterial = new Material(lineMaterial) { hideFlags = HideFlags.DontSave };
         }
-        private void Start() => Replan();
+        private void Start() => FrameTerrain();
+        private void FrameTerrain()
+        {
+            if (builder.Surface != null && terrainCamera != null)
+                terrainCamera.FrameBounds(GetComponent<MeshRenderer>().bounds);
+        }
         private void OnDisable()
         {
             if (navigation != null) navigation.Changed -= Invalidate;
-            ClearLines(); paths.Clear();
+            if (builder != null) builder.SurfaceChanged -= FrameTerrain;
+            ClearUnits(); ClearLines(); paths.Clear();
             if (ownedMaterial != null) Release(ownedMaterial);
             ownedMaterial = null;
         }
@@ -52,7 +64,13 @@ namespace GameDev.RtsRpg
         {
             paths.Clear(); ClearLines();
             // Handles belong to the old grid only. Never remove an old handle from a new map.
-            if (Grid == null || !Grid.IsAlive) blockerHandle = 0;
+            if (Grid == null || !Grid.IsAlive) { blockerHandle = 0; blockerGrid = null; }
+            else if (blockerEnabled && blockerGrid != Grid)
+            {
+                blockerGrid = Grid;
+                if (!Grid.TryAddBlocker(blocker, out blockerHandle, out string error))
+                    Debug.LogWarning(error, this);
+            }
             report = "Navigation changed. Previous results invalidated. Press Replan explicitly.";
         }
         private void Line(IReadOnlyList<Vector3> points, Color color, float width = 0.07f)
@@ -85,9 +103,25 @@ namespace GameDev.RtsRpg
             for (int i = s.y * 2 - 1; i >= 0; i--) points.Add(Sample(pose.Cell.x, pose.Cell.y + i * 0.5f));
             Line(points, color);
         }
+        private void ClearUnits()
+        {
+            foreach (var unit in units)
+            {
+                if (unit == null) continue;
+                unit.gameObject.SetActive(false);
+                Release(unit.gameObject);
+            }
+            units.Clear();
+        }
+
         private void DrawPath(NavigationPath path, NavigationFootprint f, Color color)
         {
             paths.Add(path);
+            if (movementDemo)
+            {
+                Spawn(path, f, color);
+                return;
+            }
             if (!path.IsCurrent || path.Points.Count == 0) return;
             var points = new List<Vector3>();
             for (int i = 0; i < path.Points.Count; i++)
@@ -111,16 +145,34 @@ namespace GameDev.RtsRpg
             }
             Line(points, color, 0.11f);
         }
+        private void Spawn(NavigationPath path, NavigationFootprint footprint, Color color, int team = 0)
+        {
+            if (!path.IsCurrent || path.Points.Count == 0) return;
+            var visual = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            visual.hideFlags = HideFlags.DontSave;
+            visual.name = "Demo unit";
+            visual.GetComponent<Collider>().enabled = false;
+            var renderer = visual.GetComponent<Renderer>();
+            if (ownedMaterial != null) renderer.sharedMaterial = ownedMaterial;
+            var properties = new MaterialPropertyBlock();
+            properties.SetColor("_BaseColor", color);
+            renderer.SetPropertyBlock(properties);
+            var unit = visual.AddComponent<UnitMovement>();
+            if (unit.Begin(navigation, path, footprint, team)) units.Add(unit);
+            else { visual.SetActive(false); Release(visual); }
+        }
+
         private void DrawGeometry()
         {
             if (Grid == null) return;
             var surface = Grid.Surface;
             int displayed = 0;
             if (showBoundaries)
-            for (int z = 0; z < surface.CellsZ && displayed < 5000; z++)
-            for (int x = 0; x < surface.CellsX && displayed < 5000; x++)
+            for (int z = 0; z < surface.CellsZ && displayed < 192; z++)
+            for (int x = 0; x < surface.CellsX && displayed < 192; x++)
             for (int d = 0; d < 4; d++)
             {
+                if (displayed >= 192) break;
                 var side = (TerrainDirection)d;
                 // Show discontinuities on BOTH heights, so upper/lower routes remain inspectable.
                 if (!surface.IsBoundaryBlocked(x, z, side)) continue;
@@ -152,15 +204,18 @@ namespace GameDev.RtsRpg
         [ContextMenu("Replan Demo Request")]
         public void Replan()
         {
-            ClearLines(); paths.Clear();
+            ClearUnits(); ClearLines(); paths.Clear();
             if (Grid == null) { report = navigation != null ? navigation.Error : "Navigation unavailable."; return; }
             DrawGeometry();
             if (groupMode) { PlanGroup(); return; }
             var f = new NavigationFootprint(footprint.x, footprint.y);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            int stateCount = Grid.Surface.CellsX * Grid.Surface.CellsZ * (f.NeedsTurns ? 4 : 1);
             var path = new NavigationPathfinder(Grid).Find(new NavigationRequest(new NavigationPose(start, startFacing),
-                new NavigationPose(goal, goalFacing), f, maxExpanded, allowPartial));
+                new NavigationPose(goal, goalFacing), f, movementDemo ? Math.Min(1000000, stateCount) : maxExpanded, allowPartial));
+            double searchMs = clock.Elapsed.TotalMilliseconds;
             DrawPath(path, f, Color.cyan);
-            report = $"{path.Status}: {path.Reason}\nExpanded {path.Expanded}; cost {path.Cost}; points {path.Points.Count}; revision {path.Revision}";
+            report = $"{path.Status}: {path.Reason}\nExpanded {path.Expanded}; cost {path.Cost}; points {path.Points.Count}; revision {path.Revision}; {searchMs:F1} ms";
         }
         private void PlanGroup()
         {
@@ -170,8 +225,17 @@ namespace GameDev.RtsRpg
                 new NavigationMember(new NavigationPose(start + Vector2Int.right), small),
                 new NavigationMember(new NavigationPose(start + Vector2Int.up), small),
                 new NavigationMember(new NavigationPose(start + new Vector2Int(2, 0)), large) };
-            var result = new NavigationGroupPlanner(Grid).Plan(members, goal, groupRadius);
-            report = $"Group {result.Status}: {result.Accepted}/{members.Length} assigned; {result.Expanded} expansions; shared guide {result.Corridor.Count} cells";
+            if (armyDemo)
+            {
+                members = new NavigationMember[64];
+                for (int i = 0; i < members.Length; i++)
+                    members[i] = new NavigationMember(new NavigationPose(start + new Vector2Int(i % 8 * 3, i / 8 * 3)),
+                        i % 3 == 0 ? large : i % 3 == 1 ? new NavigationFootprint(1, 2) : small);
+            }
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var result = new NavigationGroupPlanner(Grid).Plan(members, goal, groupRadius,
+                armyDemo ? 400000 : 80000, armyDemo ? 16000 : 8000);
+            report = $"Group {result.Status}: {result.Accepted}/{members.Length} assigned; {result.Expanded} expansions; shared guide {result.Corridor.Count} cells; {clock.Elapsed.TotalMilliseconds:F1} ms";
             for (int i = 0; i < members.Length; i++)
             {
                 report += $"\n{i}: {result.Paths[i].Status} — {result.Paths[i].Reason}";
@@ -180,7 +244,7 @@ namespace GameDev.RtsRpg
         }
         private void ExplicitScenario(int mode)
         {
-            builder.ShowExplicit(); groupMode = false; groupRadius = 12;
+            builder.ShowExplicit(); movementDemo = armyDemo = groupMode = false; groupRadius = 12;
             startFacing = goalFacing = TerrainDirection.North; footprint = Vector2Int.one;
             if (mode == 0) { start = new Vector2Int(1, 1); goal = new Vector2Int(20, 10); }
             if (mode == 1)
@@ -208,27 +272,86 @@ namespace GameDev.RtsRpg
             if (Grid == null) return;
             if (blockerHandle != 0)
             {
-                Grid.RemoveBlocker(blockerHandle); blockerHandle = 0;
+                blockerEnabled = false; Grid.RemoveBlocker(blockerHandle); blockerHandle = 0;
                 DrawGeometry(); report = "Blocker removed; old paths invalidated. Press Replan.";
             }
             else
             {
                 if (!Grid.TryAddBlocker(blocker, out int handle, out string error)) { report = error; return; }
                 blockerHandle = handle;
+                blockerEnabled = true; blockerGrid = Grid;
                 DrawGeometry(); report = "Blocker added; old paths invalidated. Press Replan.";
             }
         }
         private void Seed(int seed)
         {
-            builder.ShowProceduralSeed(seed); groupMode = true; groupRadius = 12;
-            start = new Vector2Int(5, 5); goal = new Vector2Int(34, 34); Replan();
+            ClearUnits();
+            builder.ShowLandformSeed(seed);
+            report = builder.BuildReport ?? "Terrain generation failed. See Console.";
         }
+
+        private void Landmark(int index)
+        {
+            if (Grid == null || Grid.Surface.Landmarks.Count != 5) return;
+            movementDemo = true;
+            armyDemo = groupMode = false;
+            start = new Vector2Int(5, 5);
+            goal = Grid.Surface.Landmarks[index] * 4 + Vector2Int.one;
+            Replan();
+        }
+
+        private void Army()
+        {
+            if (Grid == null || Grid.Surface.Landmarks.Count != 5) return;
+            movementDemo = armyDemo = groupMode = true;
+            start = new Vector2Int(5, 5);
+            goal = new Vector2Int(Grid.Surface.CellsX / 2, 16);
+            groupRadius = 20;
+            Replan();
+        }
+
+        private void Traffic(bool enemy)
+        {
+            if (Grid == null || Grid.Surface.Landmarks.Count != 5) return;
+            ClearUnits(); ClearLines();
+            var size = new NavigationFootprint(1, 1);
+            var entry = new NavigationPose(new Vector2Int(5, 5));
+            var exit = new NavigationPose(new Vector2Int(20, 5));
+            var crossing = new NavigationPose(new Vector2Int(13, 5));
+            var finder = new NavigationPathfinder(Grid);
+            Spawn(finder.Find(new NavigationRequest(crossing, crossing, size)), size,
+                enemy ? Color.red : Color.green, enemy ? 1 : 0);
+            Spawn(finder.Find(new NavigationRequest(entry, exit, size)), size, Color.cyan);
+            report = enemy ? "Enemy holds the lane" : "Ally clears the lane";
+        }
+
         private void OnGUI()
         {
             if (!showPanel || !Application.isPlaying) return;
             GUILayout.BeginArea(new Rect(12, 12, 420, Math.Min(Screen.height - 24, 560)), GUI.skin.box);
             scroll = GUILayout.BeginScrollView(scroll);
-            GUILayout.Label("Stage 04 — Navigation debug (no unit movement)");
+            GUILayout.Label("Stage 05 — Terrain and movement");
+            GUILayout.Label(builder.BuildReport ?? "Terrain unavailable.");
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Basin")) Landmark(0);
+            if (GUILayout.Button("Sealed basin")) Landmark(1);
+            if (GUILayout.Button("Hill")) Landmark(2);
+            if (GUILayout.Button("Sealed hill")) Landmark(3);
+            if (GUILayout.Button("Summit")) Landmark(4);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Army (64)")) Army();
+            if (GUILayout.Button("Allied lane")) Traffic(false);
+            if (GUILayout.Button("Enemy lane")) Traffic(true);
+            if (GUILayout.Button("Frame map")) FrameTerrain();
+            if (GUILayout.Button("Reverse route") && movementDemo && !groupMode)
+            {
+                (start, goal) = (goal, start);
+                (startFacing, goalFacing) = (goalFacing, startFacing);
+                Replan();
+            }
+            GUILayout.EndHorizontal();
+            if (units.Count > 0) GUILayout.Label($"{units.Count} units. First: {units[0].State}");
             GUILayout.Label("Cyan/colours: paths + footprints; red: cliffs/edges; magenta: static blockers.");
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Grass + ramps")) ExplicitScenario(0);
@@ -241,17 +364,18 @@ namespace GameDev.RtsRpg
             GUILayout.EndHorizontal(); GUILayout.BeginHorizontal();
             if (GUILayout.Button("Seed 104729")) Seed(104729);
             if (GUILayout.Button("Seed 130363")) Seed(130363);
-            if (GUILayout.Button("N/E/S/W map")) { builder.ShowDirections(); groupMode = false; report = "Edit start/goal in Inspector; Replan for each ramp."; DrawGeometry(); }
+            if (GUILayout.Button("Seed 20261103")) Seed(20261103);
+            if (GUILayout.Button("N/E/S/W map")) { builder.ShowDirections(); ClearUnits(); movementDemo = armyDemo = groupMode = false; report = "Edit start/goal in Inspector; Replan for each ramp."; DrawGeometry(); }
             GUILayout.EndHorizontal(); GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Request 1x1")) { footprint = Vector2Int.one; groupMode = false; Replan(); }
-            if (GUILayout.Button("Request 1x2 N")) { footprint = new Vector2Int(1, 2); startFacing = goalFacing = TerrainDirection.North; groupMode = false; Replan(); }
-            if (GUILayout.Button("Request 1x2 E")) { footprint = new Vector2Int(1, 2); startFacing = goalFacing = TerrainDirection.East; groupMode = false; Replan(); }
-            if (GUILayout.Button("Request 2x2")) { footprint = new Vector2Int(2, 2); groupMode = false; Replan(); }
+            if (GUILayout.Button("Request 1x1")) { footprint = Vector2Int.one; armyDemo = groupMode = false; Replan(); }
+            if (GUILayout.Button("Request 1x2 N")) { footprint = new Vector2Int(1, 2); startFacing = goalFacing = TerrainDirection.North; armyDemo = groupMode = false; Replan(); }
+            if (GUILayout.Button("Request 1x2 E")) { footprint = new Vector2Int(1, 2); startFacing = goalFacing = TerrainDirection.East; armyDemo = groupMode = false; Replan(); }
+            if (GUILayout.Button("Request 2x2")) { footprint = new Vector2Int(2, 2); armyDemo = groupMode = false; Replan(); }
             GUILayout.EndHorizontal(); GUILayout.BeginHorizontal();
             if (GUILayout.Button("Add/remove blocker")) ToggleBlocker();
             if (GUILayout.Button("Replan")) Replan();
             GUILayout.EndHorizontal();
-            bool visible = GUILayout.Toggle(showBoundaries, "Show impassable geometry (display capped at 5000 segments)");
+            bool visible = GUILayout.Toggle(showBoundaries, "Show impassable geometry (display capped at 192 segments)");
             if (visible != showBoundaries) { showBoundaries = visible; ClearLines(); DrawGeometry(); paths.Clear(); report = "Display changed; press Replan to redraw routes."; }
             GUILayout.Label($"Request: {start} {startFacing} → {goal} {goalFacing}; footprint {footprint}");
             GUILayout.Label(report ?? "No navigation snapshot.");

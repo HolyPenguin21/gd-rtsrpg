@@ -77,13 +77,13 @@ Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/6
 
 Процедурный генератор создаёт ограниченную карту по seed. Сначала логические зоны, стартовые точки, маршруты/рампы и проверка связности; затем декоративный шум. Использует Stage 02 Terrain Builder, не дублирует построение mesh. Критерии: повторяемость seed и связность необходимых областей.
 
-## Stage 04 — реализация Issue #7, приёмка открыта
+## Stage 04 — объединён
 
-Issue: https://github.com/HolyPenguin21/gd-rtsrpg/issues/7
+[Issue #7](https://github.com/HolyPenguin21/gd-rtsrpg/issues/7) объединён через PR #10, commit `68662ec5717febcb31bcdf4674ee5178a92efd39`. Контракт статической навигации и ручные сценарии описаны в [Stage04Navigation.md](Stage04Navigation.md).
 
-Добавлены NavigationGrid/Pathfinder/GroupPlanner и контракты footprint/pose/path, TerrainNavigation lifetime, SurfaceChanged у единственного Builder и debug demo в SampleScene. Используется реальная объединённая TerrainSurface без второй карты высот. Есть bounded A*, проверка swept space/поворотов, static blocker rectangles, revision invalidation, расширяемые групповые destinations и общий corridor. Следующий Stage 05 (движение, столкновения, live occupancy) не реализован.
+## Stage 05 — реализация в отдельной ветке
 
-Реализация подготовлена по запросу владельца в отдельной ветке/PR; не сливать до менеджерского ревью. Открытая зависимость: ручная визуальная/runtime-проверка Stage 03 владельцем, требуемая Issue #7. Unity import/compile, Play Mode и все runtime-сценарии Stage 04 — **NOT RUN**, редактор недоступен. Параметры, ограничения и процедура проверки: [Stage04Navigation.md](Stage04Navigation.md).
+[Issue #9](https://github.com/HolyPenguin21/gd-rtsrpg/issues/9) включает читаемые рампы, крупную карту с природными формами, интеграцию со Stage 04 и исполнение маршрутов. Описание и состояние проверок в [Stage05Movement.md](Stage05Movement.md). Следующий этап — Stage 06 RTS Controls.
 
 ## Проверка
 

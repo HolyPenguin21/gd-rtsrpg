@@ -10,7 +10,7 @@ namespace GameDev.RtsRpg
     [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
     public sealed class TerrainBuilder : MonoBehaviour
     {
-        public enum Source { Explicit, DirectionReview, Procedural }
+        public enum Source { Explicit, DirectionReview, Procedural, Landforms }
         [SerializeField] private Source source;
         [SerializeField] private TerrainMapData directionReviewMap;
         [SerializeField] private ProceduralMapSettings procedural = new ProceduralMapSettings();
@@ -21,6 +21,7 @@ namespace GameDev.RtsRpg
         [SerializeField] private Material rampMaterial;
         public TerrainSurface Surface { get; private set; }
         public event Action SurfaceChanged;
+        public string BuildReport { get; private set; }
         private Mesh ownedMesh;
 
         private void OnEnable() => Rebuild();
@@ -35,7 +36,13 @@ namespace GameDev.RtsRpg
             try
             {
                 TerrainSurface surface;
-                if (source == Source.Procedural) surface = ProceduralTerrainGenerator.Generate(procedural);
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                long memoryStart = GC.GetAllocatedBytesForCurrentThread();
+                if (source == Source.Procedural || source == Source.Landforms)
+                {
+                    procedural.naturalLandforms = source == Source.Landforms;
+                    surface = ProceduralTerrainGenerator.Generate(procedural);
+                }
                 else
                 {
                     var input = source == Source.DirectionReview ? directionReviewMap : map;
@@ -44,7 +51,16 @@ namespace GameDev.RtsRpg
                 }
                 if (grassMaterial == null || cliffMaterial == null || rampMaterial == null)
                     throw new ArgumentException("Terrain Builder needs grass, cliff and ramp materials.");
+                double generationMs = clock.Elapsed.TotalMilliseconds;
+                long generationBytes = GC.GetAllocatedBytesForCurrentThread() - memoryStart;
+                clock.Restart();
+                memoryStart = GC.GetAllocatedBytesForCurrentThread();
                 Mesh mesh = BuildMesh(surface);
+                double meshMs = clock.Elapsed.TotalMilliseconds;
+                long meshBytes = GC.GetAllocatedBytesForCurrentThread() - memoryStart;
+                BuildReport = $"{surface.CellsX}×{surface.CellsZ} cells. Generation {generationMs:F1} ms / {generationBytes:N0} B; "
+                    + $"mesh {meshMs:F1} ms / {meshBytes:N0} B managed; {mesh.vertexCount:N0} vertices / "
+                    + $"{(mesh.GetIndexCount(0) + mesh.GetIndexCount(1) + mesh.GetIndexCount(2)) / 3:N0} triangles.";
                 GetComponent<MeshRenderer>().sharedMaterials = new[] { grassMaterial, cliffMaterial, rampMaterial };
                 ownedMesh = mesh;
                 GetComponent<MeshFilter>().sharedMesh = mesh;
@@ -76,10 +92,20 @@ namespace GameDev.RtsRpg
             Rebuild();
         }
 
+        public void ShowLandformSeed(int seed)
+        {
+            source = Source.Landforms;
+            procedural.seed = seed;
+            procedural.width = Mathf.Max(64, procedural.width);
+            procedural.length = Mathf.Max(64, procedural.length);
+            Rebuild();
+        }
+
         private void Release()
         {
             bool hadSurface = Surface != null;
             Surface = null;
+            BuildReport = null;
             if (hadSurface) SurfaceChanged?.Invoke();
             if (ownedMesh == null) return;
             var filter = GetComponent<MeshFilter>();
