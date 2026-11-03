@@ -90,7 +90,7 @@ namespace GameDev.RtsRpg
                 var member = members[index];
                 NavigationPath failure = null;
                 if (!grid.IsAlive) failure = new NavigationPath(grid, NavigationStatus.Stale, "Grid retired.");
-                else if (!member.Footprint.IsValid || (uint)member.Start.Facing > 3)
+                else if (!member.Footprint.IsValid || (uint)member.Start.Facing > 7)
                     failure = new NavigationPath(grid, NavigationStatus.InvalidRequest, "Unsupported footprint or facing.");
                 else if (!grid.CanOccupy(member.Start, member.Footprint))
                     failure = new NavigationPath(grid, NavigationStatus.InvalidStart, "Invalid group member start.");
@@ -134,56 +134,113 @@ namespace GameDev.RtsRpg
 
         internal List<Vector2Int> BuildTargetArea(Vector2Int target, int radius)
         {
-            var cells = new List<Vector2Int>();
-            var single = new NavigationFootprint(1, 1);
-            if (!grid.CanOccupy(new NavigationPose(target), single)) return cells;
-            var visited = new HashSet<Vector2Int> { target };
-            cells.Add(target);
-            // Flood only from the pointed surface, inside the local search window.
-            // A nearby anchor across a cliff is eligible only via a real local passage.
-            for (int i = 0; i < cells.Count; i++)
+            var flood = new TargetFlood(grid, target, radius);
+            flood.Advance(new NavigationBudget(int.MaxValue));
+            return flood.Cells;
+        }
+
+        internal sealed class TargetFlood
+        {
+            private static readonly NavigationFootprint Single = new(1, 1);
+            private static readonly Unity.Profiling.ProfilerMarker Marker = new("Navigation.TargetArea");
+            private readonly NavigationGrid grid;
+            private readonly Vector2Int target;
+            private readonly int radius, revision;
+            private readonly bool[] visited;
+            private int cursor, boundaryCursor;
+            internal List<Vector2Int> Cells { get; } = new();
+            internal List<Vector2Int> EntryCells { get; } = new();
+
+            internal TargetFlood(NavigationGrid grid, Vector2Int target, int radius)
             {
-                var from = new NavigationPose(cells[i]);
-                for (int d = 0; d < 4; d++)
+                this.grid = grid;
+                this.target = target;
+                this.radius = radius;
+                revision = grid.Revision;
+                int width = radius * 2 + 1;
+                visited = new bool[width * width];
+                if (!grid.CanOccupy(new NavigationPose(target), Single)) return;
+                visited[Index(target)] = true;
+                Cells.Add(target);
+            }
+
+            private int Index(Vector2Int cell) =>
+                cell.x - target.x + radius + (cell.y - target.y + radius) * (radius * 2 + 1);
+
+            internal bool Contains(Vector2Int cell) => Math.Abs(cell.x - target.x) <= radius
+                && Math.Abs(cell.y - target.y) <= radius && visited[Index(cell)];
+
+            internal bool Advance(NavigationBudget budget)
+            {
+                using var marker = Marker.Auto();
+                if (!grid.IsAlive || revision != grid.Revision) { Cells.Clear(); EntryCells.Clear(); return true; }
+                while (cursor < Cells.Count)
                 {
-                    var to = new NavigationPose(from.Cell + TerrainSurface.Step((TerrainDirection)d));
-                    if (Math.Max(Math.Abs(to.Cell.x - target.x), Math.Abs(to.Cell.y - target.y)) <= radius
-                        && !visited.Contains(to.Cell) && grid.CanStep(from, to, single))
+                    if (!budget.Take()) return false;
+                    var pose = new NavigationPose(Cells[cursor++]);
+                    int mask = grid.Edges(pose, Single);
+                    for (int i = 0; i < 8; i += 2)
                     {
-                        visited.Add(to.Cell);
-                        cells.Add(to.Cell);
+                        if ((mask & (1 << i)) == 0) continue;
+                        var cell = pose.Cell + NavigationPose.Steps[i];
+                        if (Math.Abs(cell.x - target.x) > radius || Math.Abs(cell.y - target.y) > radius) continue;
+                        int index = Index(cell);
+                        if (visited[index]) continue;
+                        visited[index] = true;
+                        Cells.Add(cell);
                     }
                 }
+                while (boundaryCursor < Cells.Count)
+                {
+                    if (!budget.Take()) return false;
+                    Vector2Int cell = Cells[boundaryCursor++];
+                    foreach (var step in NavigationPose.Steps)
+                    {
+                        Vector2Int neighbor = cell + step;
+                        if (!grid.Surface.Contains(neighbor.x, neighbor.y) || Contains(neighbor)) continue;
+                        EntryCells.Add(cell);
+                        break;
+                    }
+                }
+                return true;
             }
-            return cells;
         }
 
         internal IEnumerable<NavigationPose> DestinationCandidates(NavigationFootprint footprint,
             IReadOnlyList<Vector2Int> area, HashSet<Vector2Int> reserved, NavigationPose? ownSlot = null)
         {
-            RectInt ownArea = ownSlot.HasValue
-                ? new RectInt(ownSlot.Value.Cell, footprint.Size(ownSlot.Value.Facing)) : default;
-            int orientations = footprint.NeedsTurns ? 4 : 1;
-            foreach (var cell in area)
-            for (int facing = 0; facing < orientations; facing++)
-            {
-                var pose = new NavigationPose(cell, (TerrainDirection)facing);
-                if (grid.CanOccupy(pose, footprint) && !Overlaps(pose, footprint, reserved, ownArea))
-                    yield return pose;
-            }
+            int cursor = 0;
+            while (cursor < area.Count * footprint.Orientations)
+                if (TryCandidate(footprint, area, reserved, ownSlot, ref cursor, out var pose)) yield return pose;
         }
 
-        private static bool Overlaps(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved,
-            RectInt ownArea)
+        // Exactly one candidate per call, including rejected slots. The demo
+        // can suspend even when almost all positions are already reserved.
+        internal bool TryCandidate(NavigationFootprint footprint, IReadOnlyList<Vector2Int> area,
+            HashSet<Vector2Int> reserved, NavigationPose? ownSlot, ref int cursor, out NavigationPose pose,
+            NavigationFacing preferred = NavigationFacing.North)
         {
+            int orientations = footprint.Orientations;
+            int rank = cursor % orientations;
+            int facing = footprint.NeedsTurns ? ((int)preferred + rank * 2 + rank / 4) & 7 : 0;
+            pose = new NavigationPose(area[cursor / orientations], (NavigationFacing)facing);
+            cursor++;
+            if (!grid.CanOccupy(pose, footprint)) return false;
+            return CanReserve(pose, footprint, reserved, ownSlot);
+        }
+
+        internal static bool CanReserve(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved,
+            NavigationPose? ownSlot)
+        {
+            RectInt ownArea = ownSlot.HasValue ? new RectInt(ownSlot.Value.Cell, f.Size(ownSlot.Value.Facing)) : default;
             Vector2Int s = f.Size(p.Facing);
             for (int z = 0; z < s.y; z++)
             for (int x = 0; x < s.x; x++)
             {
                 var cell = p.Cell + new Vector2Int(x, z);
-                if (reserved.Contains(cell) && !ownArea.Contains(cell)) return true;
+                if (reserved.Contains(cell) && !ownArea.Contains(cell)) return false;
             }
-            return false;
+            return true;
         }
         internal static void Reserve(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved, bool add = true)
         {

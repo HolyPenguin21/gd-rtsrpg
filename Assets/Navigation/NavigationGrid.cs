@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Unity.Profiling;
 using UnityEngine;
 
 namespace GameDev.RtsRpg
@@ -7,18 +8,35 @@ namespace GameDev.RtsRpg
     /// <summary>Owns static occupancy only. Geometry always comes from the immutable TerrainSurface.</summary>
     public sealed class NavigationGrid
     {
+        private static readonly ProfilerMarker PickMarker = new("Navigation.TryPickSurface");
+        private static readonly ProfilerMarker StepMarker = new("Navigation.CanStep");
+        private static readonly ProfilerMarker TurnMarker = new("Navigation.CanTurn");
         public const int MaxCells = 262144;
         public TerrainSurface Surface { get; }
         public Matrix4x4 LocalToWorld { get; }
         private readonly Matrix4x4 worldToLocal;
         private readonly int[] blocked;
+        private readonly byte[] cliffs;
+        private readonly ushort[][] geometryEdges;
+        private readonly int maxQuarterHeight;
+        private int CellCount => blocked.Length;
+        internal int StateId(NavigationPose pose) =>
+            pose.Cell.x + pose.Cell.y * Surface.CellsX + (int)pose.Facing * CellCount;
+        internal NavigationPose Pose(int state)
+        {
+            int cell = state % CellCount;
+            return new NavigationPose(new Vector2Int(cell % Surface.CellsX, cell / Surface.CellsX),
+                (NavigationFacing)(state / CellCount));
+        }
         private readonly Dictionary<int, RectInt> blockers = new Dictionary<int, RectInt>();
         private int nextBlocker = 1;
         public int Revision { get; private set; } = 1;
         public bool IsAlive { get; private set; } = true;
         public event Action Changed;
 
-        public NavigationGrid(TerrainSurface surface, Matrix4x4 localToWorld)
+        public NavigationGrid(TerrainSurface surface, Matrix4x4 localToWorld) : this(surface, localToWorld, null) { }
+
+        internal NavigationGrid(TerrainSurface surface, Matrix4x4 localToWorld, NavigationGrid previous)
         {
             Surface = surface ?? throw new ArgumentNullException(nameof(surface));
             if ((long)surface.CellsX * surface.CellsZ > MaxCells)
@@ -42,18 +60,35 @@ namespace GameDev.RtsRpg
             for (int i = 0; i < 16; i++)
                 if (!Finite(worldToLocal[i])) throw new ArgumentException("Navigation transform inverse must be finite.");
             blocked = new int[surface.CellsX * surface.CellsZ];
-            // Reject finite inputs whose transformed endpoints overflow float coordinates.
-            for (int zc = 0; zc < surface.CellsZ; zc++)
-            for (int xc = 0; xc < surface.CellsX; xc++)
+            if (previous != null && ReferenceEquals(surface, previous.Surface))
             {
-                var c = surface.GetCell(xc, zc);
-                for (int dz = 0; dz <= 1; dz++)
-                for (int dx = 0; dx <= 1; dx++)
+                cliffs = previous.cliffs;
+                geometryEdges = previous.geometryEdges;
+                maxQuarterHeight = previous.maxQuarterHeight;
+            }
+            else
+            {
+                maxQuarterHeight = surface.BaseQuarterLevel;
+                cliffs = new byte[CellCount];
+                geometryEdges = new[] { new ushort[CellCount], new ushort[CellCount], new ushort[CellCount * 8] };
+                for (int zc = 0; zc < surface.CellsZ; zc++)
+                for (int xc = 0; xc < surface.CellsX; xc++)
                 {
-                    Vector3 p = localToWorld.MultiplyPoint3x4(surface.Position(xc + dx, zc + dz, c.Corner(dx, dz)));
-                    if (!Finite(p.x) || !Finite(p.y) || !Finite(p.z))
-                        throw new ArgumentException("Navigation transformed surface exceeds finite world coordinates.");
+                    var c = surface.GetCell(xc, zc);
+                    cliffs[xc + zc * surface.CellsX] = (byte)(
+                        (surface.IsBoundaryBlocked(xc, zc, TerrainDirection.East) ? 1 : 0)
+                        | (surface.IsBoundaryBlocked(xc, zc, TerrainDirection.North) ? 2 : 0));
+                    for (int dz = 0; dz <= 1; dz++)
+                    for (int dx = 0; dx <= 1; dx++) maxQuarterHeight = Math.Max(maxQuarterHeight, c.Corner(dx, dz));
                 }
+            }
+            // An affine transform reaches its extrema at bounding box corners.
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 p = localToWorld.MultiplyPoint3x4(surface.Position((i & 1) == 0 ? 0 : surface.CellsX,
+                    (i & 2) == 0 ? 0 : surface.CellsZ, (i & 4) == 0 ? surface.BaseQuarterLevel : maxQuarterHeight));
+                if (!Finite(p.x) || !Finite(p.y) || !Finite(p.z))
+                    throw new ArgumentException("Navigation transformed surface exceeds finite world coordinates.");
             }
         }
 
@@ -71,6 +106,7 @@ namespace GameDev.RtsRpg
         // planar corner heights define both the mesh top and WorldPoint.
         internal bool TryPickSurface(Ray ray, out Vector2Int cell)
         {
+            using var marker = PickMarker.Auto();
             cell = default;
             if (!IsAlive) return false;
             float scale = 4f / Surface.BlockWorldSize;
@@ -140,61 +176,111 @@ namespace GameDev.RtsRpg
 
         public NavigationPoint Point(NavigationPose pose, NavigationFootprint footprint)
         {
-            Vector2Int size = footprint.Size(pose.Facing);
-            return new NavigationPoint(pose, WorldPoint(pose.Cell.x + size.x * 0.5f, pose.Cell.y + size.y * 0.5f));
+            Vector2 centre = pose.Centre(footprint);
+            return new NavigationPoint(pose, WorldPoint(centre.x, centre.y));
         }
 
         public bool IsBlocked(int x, int z) => !IsAlive || !Surface.Contains(x, z) || blocked[x + z * Surface.CellsX] > 0;
 
         public bool CanOccupy(NavigationPose pose, NavigationFootprint footprint)
         {
-            if (!IsAlive || !footprint.IsValid || (uint)pose.Facing > 3) return false;
+            if (!IsAlive || !footprint.IsValid || (uint)pose.Facing > 7) return false;
             Vector2Int size = footprint.Size(pose.Facing);
-            return ClearRectangle(pose.Cell.x, pose.Cell.y, size.x, size.y);
+            return ClearRectangle(pose.Cell.x, pose.Cell.y, size.x, size.y, blockers.Count != 0);
         }
 
-        // Internal edges matter too: a large footprint cannot straddle a cliff even at rest.
-        private bool ClearRectangle(int x, int z, int width, int length)
+        // Internal edges matter too: a footprint cannot straddle a cliff even at rest.
+        private bool ClearRectangle(int x, int z, int width, int length, bool checkBlockers)
         {
-            if (x < 0 || z < 0 || width < 1 || length < 1 || (long)x + width > Surface.CellsX
-                || (long)z + length > Surface.CellsZ) return false;
+            int stride = Surface.CellsX;
+            if (x < 0 || z < 0 || x > stride - width || z > Surface.CellsZ - length) return false;
             for (int dz = 0; dz < length; dz++)
-            for (int dx = 0; dx < width; dx++)
             {
-                int cx = x + dx, cz = z + dz;
-                if (IsBlocked(cx, cz)) return false;
-                if (dx + 1 < width && Surface.IsBoundaryBlocked(cx, cz, TerrainDirection.East)) return false;
-                if (dz + 1 < length && Surface.IsBoundaryBlocked(cx, cz, TerrainDirection.North)) return false;
+                int index = x + (z + dz) * stride;
+                int north = dz + 1 < length ? 2 : 0;
+                for (int dx = 0; dx < width; dx++, index++)
+                {
+                    int edges = north | (dx + 1 < width ? 1 : 0);
+                    if ((cliffs[index] & edges) != 0 || (checkBlockers && blocked[index] != 0)) return false;
+                }
             }
             return true;
         }
 
         public bool CanStep(NavigationPose from, NavigationPose to, NavigationFootprint footprint)
         {
-            if (!CanOccupy(from, footprint) || !CanOccupy(to, footprint) || from.Facing != to.Facing) return false;
-            int dx = to.Cell.x - from.Cell.x, dz = to.Cell.y - from.Cell.y;
-            if (Math.Abs(dx) > 1 || Math.Abs(dz) > 1 || (dx == 0 && dz == 0)) return false;
+            using var marker = StepMarker.Auto();
+            if (!IsAlive || !footprint.IsValid || (uint)from.Facing > 7 || from.Facing != to.Facing
+                || !Surface.Contains(from.Cell.x, from.Cell.y) || !Surface.Contains(to.Cell.x, to.Cell.y)) return false;
+            Vector2Int delta = to.Cell - from.Cell;
+            if (footprint.NeedsTurns && delta != NavigationPose.Steps[(int)from.Facing]) return false;
+            if (Math.Abs(delta.x) > 1 || Math.Abs(delta.y) > 1 || delta == Vector2Int.zero) return false;
+            return StepClear(from, delta, footprint, blockers.Count != 0);
+        }
+
+        // Yielding is an explicit recovery manoeuvre and may take a side/back step.
+        internal bool CanYieldStep(NavigationPose from, NavigationPose to, NavigationFootprint footprint)
+            => IsAlive && StepClear(from, to.Cell - from.Cell, footprint, blockers.Count != 0);
+
+        private bool StepClear(NavigationPose from, Vector2Int delta, NavigationFootprint footprint, bool checkBlockers)
+        {
             Vector2Int size = footprint.Size(from.Facing);
-            // Entire swept rectangle, including both orthogonal alternatives of a diagonal.
-            return ClearRectangle(Math.Min(from.Cell.x, to.Cell.x), Math.Min(from.Cell.y, to.Cell.y),
-                size.x + Math.Abs(dx), size.y + Math.Abs(dz));
+            // Includes both orthogonal alternatives of a diagonal step.
+            return ClearRectangle(from.Cell.x + Math.Min(0, delta.x), from.Cell.y + Math.Min(0, delta.y),
+                size.x + Math.Abs(delta.x), size.y + Math.Abs(delta.y), checkBlockers);
         }
 
         public bool CanTurn(NavigationPose from, NavigationPose to, NavigationFootprint footprint)
         {
-            if (!footprint.NeedsTurns || from.Cell != to.Cell || !CanOccupy(from, footprint) || !CanOccupy(to, footprint)) return false;
-            int delta = ((int)to.Facing - (int)from.Facing + 4) % 4;
-            if (delta != 1 && delta != 3) return false;
-            // Lower-left anchor is stable; rectangle centre shifts by half a cell while turning.
-            // Bound the rotation AND that centre shift with the union of circumscribed discs.
-            // This deliberately conservative envelope needs a clear 4x4 turning pad for 1x2.
+            using var marker = TurnMarker.Auto();
+            if (!IsAlive || !footprint.NeedsTurns || from.Cell != to.Cell
+                || (uint)from.Facing > 7 || (uint)to.Facing > 7) return false;
+            int delta = ((int)to.Facing - (int)from.Facing + 8) & 7;
+            return (delta == 1 || delta == 7) && TurnClear(from, to, footprint, blockers.Count != 0);
+        }
+
+        private bool TurnClear(NavigationPose from, NavigationPose to, NavigationFootprint footprint, bool checkBlockers)
+        {
+            // Every intermediate body orientation fits in a radius of sqrt(5)/2.
+            // Both centres use half-cell increments, so that radius always reaches
+            // at least one cell past the floor/ceil of either centre.
+            if (!Surface.Contains(from.Cell.x, from.Cell.y)) return false;
             Vector2Int a = footprint.Size(from.Facing), b = footprint.Size(to.Facing);
-            float radius = Mathf.Sqrt(footprint.Width * footprint.Width + footprint.Length * footprint.Length) * 0.5f;
-            int minX = Mathf.FloorToInt(from.Cell.x + Math.Min(a.x, b.x) * 0.5f - radius);
-            int minZ = Mathf.FloorToInt(from.Cell.y + Math.Min(a.y, b.y) * 0.5f - radius);
-            int maxX = Mathf.CeilToInt(from.Cell.x + Math.Max(a.x, b.x) * 0.5f + radius);
-            int maxZ = Mathf.CeilToInt(from.Cell.y + Math.Max(a.y, b.y) * 0.5f + radius);
-            return ClearRectangle(minX, minZ, maxX - minX, maxZ - minZ);
+            int minX = ((Math.Min(a.x, b.x) + 1) >> 1) - 2;
+            int minZ = ((Math.Min(a.y, b.y) + 1) >> 1) - 2;
+            int maxX = (Math.Max(a.x, b.x) >> 1) + 2;
+            int maxZ = (Math.Max(a.y, b.y) >> 1) + 2;
+            return ClearRectangle(from.Cell.x + minX, from.Cell.y + minZ,
+                maxX - minX, maxZ - minZ, checkBlockers);
+        }
+
+        // Terrain-only transitions survive blocker edits. Blockers are overlaid
+        // at query time and never invalidate the immutable geometry cache.
+        internal int Edges(NavigationPose pose, NavigationFootprint footprint)
+        {
+            var cache = geometryEdges[footprint.Graph];
+            int index = StateId(pose);
+            int mask = cache[index];
+            if (mask == 0)
+            {
+                mask = 1 << 10;
+                int first = footprint.NeedsTurns ? (int)pose.Facing : 0;
+                int last = footprint.NeedsTurns ? first + 1 : 8;
+                for (int i = first; i < last; i++)
+                    if (StepClear(pose, NavigationPose.Steps[i], footprint, false)) mask |= 1 << i;
+                if (footprint.NeedsTurns)
+                {
+                    if (TurnClear(pose, pose.Turn(-1), footprint, false)) mask |= 1 << 8;
+                    if (TurnClear(pose, pose.Turn(1), footprint, false)) mask |= 1 << 9;
+                }
+                cache[index] = (ushort)mask;
+            }
+            if (blockers.Count == 0) return mask & 1023;
+            for (int i = 0; i < 8; i++)
+                if ((mask & (1 << i)) != 0 && !StepClear(pose, NavigationPose.Steps[i], footprint, true)) mask &= ~(1 << i);
+            if ((mask & 256) != 0 && !TurnClear(pose, pose.Turn(-1), footprint, true)) mask &= ~256;
+            if ((mask & 512) != 0 && !TurnClear(pose, pose.Turn(1), footprint, true)) mask &= ~512;
+            return mask & 1023;
         }
 
         public bool TryAddBlocker(RectInt rectangle, out int handle, out string error)

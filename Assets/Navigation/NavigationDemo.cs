@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Unity.Profiling;
+using Clock = System.Diagnostics.Stopwatch;
 using UnityEngine;
 
 namespace GameDev.RtsRpg
@@ -24,13 +26,20 @@ namespace GameDev.RtsRpg
         [SerializeField, Min(0.2f)] private float followInterval = 0.28f;
         [SerializeField, Min(1)] private int followDistance = 2;
 
+        [SerializeField, Range(0.25f, 8f)] private float planningMilliseconds = 1.5f;
+        private static readonly ProfilerMarker PlanningMarker = new("Navigation.PlanningFrame");
+        private static readonly ProfilerMarker HoverMarker = new("Navigation.SampleFollowTarget");
+        private static readonly ProfilerMarker GuideMarker = new("Navigation.AdvanceGuide");
+        private static readonly ProfilerMarker ParticipantMarker = new("Navigation.AdvanceParticipant");
+        private static readonly ProfilerMarker GuiMarker = new("Navigation.OnGUI");
+
         private sealed class Participant
         {
             public UnitMovement Unit;
             public NavigationFootprint Footprint;
             public NavigationPose? Destination;
             public NavigationStatus? LastAttempt;
-            public int Failures, LastTrafficRevision;
+            public int Failures, LastTrafficRevision, NextCandidate;
             public float RetryAt;
             public bool Reserved, Assigned;
         }
@@ -38,16 +47,23 @@ namespace GameDev.RtsRpg
         private sealed class ParticipantPlan
         {
             public Participant Entry;
-            public IEnumerator<NavigationPose> Candidates;
             public NavigationPathfinder.Search Search;
+            public NavigationPathfinder.ApproachField Field;
+            public List<NavigationPoint> Prefix;
+            public NavigationPose Approach, Goal;
+            public NavigationPath Suffix;
             public Func<NavigationPose, NavigationPose, bool> AllowsEdge;
-            public int Tried, Remaining, TrafficRevision;
+            public int Tried, Remaining, TrafficRevision, CandidateIndex, PrefixCost, SuffixIndex;
+            public int FieldLimit = 8192;
+            public int ApproachPointCount;
+            public bool NeedsSlot, HasCandidate, LocalSearch, StartsInside, ApproachReady;
         }
 
         private readonly List<Participant> units = new List<Participant>();
         private readonly HashSet<Vector2Int> reservations = new();
-        private readonly HashSet<Vector2Int> sharedCorridor = new();
-        private readonly System.Diagnostics.Stopwatch planningClock = new();
+        private readonly NavigationPathfinder.ApproachField[] fields = new NavigationPathfinder.ApproachField[3];
+        private readonly NavigationBudget frameWork = new(0);
+        private NavigationGroupPlanner.TargetFlood targetFlood, acceptedArea;
         private List<Vector2Int> targetArea;
         private NavigationGrid sessionGrid;
         private NavigationGroupPlanner planner;
@@ -57,12 +73,18 @@ namespace GameDev.RtsRpg
         private Vector2Int guideTarget;
         private bool followMouse, guideFromHover;
         private NavigationPathfinder.Search guideSearch;
+        private const int ConcurrentPlans = 3;
+        private readonly List<ParticipantPlan> participantPlans = new(ConcurrentPlans);
         private ParticipantPlan participantPlan;
         private int guideExpanded, nextHoverGuideFrame;
         private float nextFollow;
         private int planIndex, targetExpanded, frameExpanded;
         private long totalExpanded;
-        private double targetMs, guideMs;
+        private double lastPlanningMs, sumPlanningMs, peakPlanningMs;
+        private long lastPlanningBytes, sumPlanningBytes, peakPlanningBytes;
+        private int planningFrames, assignments, sharedAssignments, fullSearches;
+        private string trafficReport, planningReport, requestReport;
+        private float nextReport, nextRequestReport;
         private string targetReport;
         private Rect Panel => new Rect(12, 12, 420, Math.Min(Screen.height - 24, 560));
         private bool movementDemo, armyDemo;
@@ -75,6 +97,7 @@ namespace GameDev.RtsRpg
         private readonly List<NavigationPath> paths = new List<NavigationPath>();
         private readonly List<GameObject> lines = new List<GameObject>();
         private Material ownedMaterial;
+        private Mesh mountedPreview;
         private int blockerHandle;
         private NavigationGrid laneGrid;
         private UnitMovement sealedLaneGuard;
@@ -107,6 +130,8 @@ namespace GameDev.RtsRpg
             blockerGrid = null;
             if (ownedMaterial != null) Release(ownedMaterial);
             ownedMaterial = null;
+            if (mountedPreview != null) Release(mountedPreview);
+            mountedPreview = null;
         }
         private static void Release(UnityEngine.Object obj)
         { if (Application.isPlaying) Destroy(obj); else DestroyImmediate(obj); }
@@ -117,7 +142,7 @@ namespace GameDev.RtsRpg
             followMouse = false;
             requestedTarget = hoverTarget = lastRejectedTarget = null;
             CancelGuide();
-            CancelParticipantPlan();
+            CancelParticipantPlans();
             if (sessionGrid != null && sessionGrid != Grid)
             {
                 ClearUnits();
@@ -125,12 +150,13 @@ namespace GameDev.RtsRpg
             }
             if (laneGrid != null && laneGrid != Grid) ClearLane();
             if (sessionGrid == Grid)
-                foreach (var entry in units) { entry.RetryAt = 0; entry.Failures = 0; entry.LastAttempt = null; }
+                foreach (var entry in units) { entry.RetryAt = 0; entry.Failures = entry.NextCandidate = 0; entry.LastAttempt = null; }
             if (acceptedTarget.HasValue && sessionGrid == Grid && Grid != null)
             {
                 requestedTarget = acceptedTarget;
-                sharedCorridor.Clear();
+                ClearFields();
                 targetArea = null;
+                acceptedArea = null;
             }
             // Handles belong to the old grid only. Never remove an old handle from a new map.
             if (Grid == null || !Grid.IsAlive) { blockerHandle = 0; blockerGrid = null; }
@@ -175,7 +201,7 @@ namespace GameDev.RtsRpg
         private void ClearUnits()
         {
             CancelGuide();
-            CancelParticipantPlan();
+            CancelParticipantPlans();
             foreach (var entry in units)
             {
                 if (entry.Unit == null) continue;
@@ -187,12 +213,16 @@ namespace GameDev.RtsRpg
             nextFollow = 0;
             planIndex = targetExpanded = frameExpanded = nextHoverGuideFrame = 0;
             totalExpanded = 0;
-            targetMs = 0;
-            targetReport = null;
+            lastPlanningMs = sumPlanningMs = peakPlanningMs = 0;
+            lastPlanningBytes = sumPlanningBytes = peakPlanningBytes = 0;
+            planningFrames = assignments = sharedAssignments = fullSearches = 0;
+            targetReport = trafficReport = planningReport = null;
+            nextReport = 0;
             reservations.Clear();
-            sharedCorridor.Clear();
+            ClearFields();
             acceptedTarget = requestedTarget = hoverTarget = lastRejectedTarget = null;
             targetArea = null;
+            acceptedArea = null;
             sessionGrid = null;
             planner = null;
             finder = null;
@@ -237,6 +267,8 @@ namespace GameDev.RtsRpg
             visual.hideFlags = HideFlags.DontSave;
             visual.name = footprint.NeedsTurns ? "Demo mounted unit (1x2)" : "Demo unit";
             visual.GetComponent<Collider>().enabled = false;
+            if (footprint.NeedsTurns)
+                visual.GetComponent<MeshFilter>().sharedMesh = mountedPreview ??= BuildMountedPreview();
             var renderer = visual.GetComponent<Renderer>();
             if (ownedMaterial != null) renderer.sharedMaterial = ownedMaterial;
             var properties = new MaterialPropertyBlock();
@@ -259,6 +291,28 @@ namespace GameDev.RtsRpg
             visual.SetActive(false);
             Release(visual);
             return null;
+        }
+
+        private static Mesh BuildMountedPreview()
+        {
+            // Shared debug silhouette with a visible front on local +Z.
+            var mesh = new Mesh { name = "Mounted unit preview", hideFlags = HideFlags.DontSave };
+            mesh.vertices = new[]
+            {
+                new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, -0.5f),
+                new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(0.5f, 0.5f, -0.5f),
+                new Vector3(-0.275f, -0.5f, 0.5f), new Vector3(0.275f, -0.5f, 0.5f),
+                new Vector3(-0.275f, 0.5f, 0.5f), new Vector3(0.275f, 0.5f, 0.5f)
+            };
+            mesh.triangles = new[]
+            {
+                0, 2, 3, 0, 3, 1, 4, 5, 7, 4, 7, 6,
+                0, 4, 6, 0, 6, 2, 1, 3, 7, 1, 7, 5,
+                0, 1, 5, 0, 5, 4, 2, 6, 7, 2, 7, 3
+            };
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
         }
 
         private void DrawGeometry()
@@ -315,9 +369,9 @@ namespace GameDev.RtsRpg
             if (groupMode) { PlanGroup(); return; }
             var f = new NavigationFootprint(footprint.x, footprint.y);
             var clock = System.Diagnostics.Stopwatch.StartNew();
-            int stateCount = Grid.Surface.CellsX * Grid.Surface.CellsZ * (f.NeedsTurns ? 4 : 1);
+            int stateCount = Grid.Surface.CellsX * Grid.Surface.CellsZ * f.Orientations;
             var path = new NavigationPathfinder(Grid).Find(new NavigationRequest(new NavigationPose(start, startFacing),
-                new NavigationPose(goal, goalFacing), f, movementDemo ? Math.Min(1000000, stateCount) : maxExpanded, allowPartial));
+                new NavigationPose(goal, goalFacing), f, movementDemo ? stateCount : maxExpanded, allowPartial));
             double searchMs = clock.Elapsed.TotalMilliseconds;
             DrawPath(path, f, Color.cyan);
             report = $"{path.Status}: {path.Reason}\nExpanded {path.Expanded}; cost {path.Cost}; points {path.Points.Count}; revision {path.Revision}; {searchMs:F1} ms";
@@ -408,7 +462,7 @@ namespace GameDev.RtsRpg
             Replan();
         }
 
-        private void Army()
+        private void Army(int count = 64)
         {
             if (Grid == null || Grid.Surface.Landmarks.Count != 5) return;
             ClearUnits(); ClearLane(); ClearLines(); paths.Clear();
@@ -419,20 +473,28 @@ namespace GameDev.RtsRpg
             var spawnFinder = new NavigationPathfinder(Grid);
             // Keep the entire mixed spawn on level zero, including its footprint.
             // Skip local cliffs/blocked cells and extend the formation across the plain.
-            for (int z = 5; z < 29 && units.Count < 64; z += 3)
-            for (int x = 5; x < 65 && units.Count < 64; x += 3)
+            for (int z = 5; z < 29 && units.Count < count; z += 3)
+            for (int x = 5; x < 65 && units.Count < count; x += 3)
             {
                 int i = units.Count;
                 var anchor = new NavigationPose(new Vector2Int(x, z));
                 var size = i % 3 == 0 ? new NavigationFootprint(2, 2)
                     : i % 3 == 1 ? new NavigationFootprint(1, 2) : new NavigationFootprint(1, 1);
-                if (!Grid.CanOccupy(anchor, size) || Grid.Surface.GetCell(x, z).Level != 0
-                    || Grid.Surface.GetCell(x, z).IsRamp) continue;
+                if (!Grid.CanOccupy(anchor, size)) continue;
+                var span = size.Size(anchor.Facing);
+                bool onPlain = true;
+                for (int dz = 0; dz < span.y; dz++)
+                for (int dx = 0; dx < span.x; dx++)
+                {
+                    var cell = Grid.Surface.GetCell(x + dx, z + dz);
+                    onPlain &= cell.Level == 0 && !cell.IsRamp;
+                }
+                if (!onPlain) continue;
                 Spawn(spawnFinder.Find(new NavigationRequest(anchor, anchor, size, 1)), size,
                     Color.HSVToRGB(i * 0.21f, 0.85f, 1), hold: true);
             }
             requestedTarget = goal;
-            report = $"Army spawned: {units.Count}/64. Enable Follow Mouse to steer.";
+            report = $"Army spawned: {units.Count}/{count}. Enable Follow Mouse to steer.";
         }
 
         private void ClearLane()
@@ -511,7 +573,9 @@ namespace GameDev.RtsRpg
             if (units.Count == 0 || Grid != sessionGrid || !navigation.HasCurrentTransform) return;
             if (!Application.isFocused || Time.deltaTime <= 0f)
             {
-                if (followMouse) CancelHoverTarget();
+                CancelHoverTarget();
+                if (GuideActive) { requestedTarget = guideTarget; CancelGuide(); }
+                CancelParticipantPlans();
                 nextFollow = 0f;
                 return;
             }
@@ -519,38 +583,66 @@ namespace GameDev.RtsRpg
             {
                 var entry = units[i];
                 if (entry.Unit != null && entry.Unit.isActiveAndEnabled) continue;
-                if (participantPlan?.Entry == entry) CancelParticipantPlan();
+                for (int j = participantPlans.Count - 1; j >= 0; j--)
+                    if (participantPlans[j].Entry == entry)
+                    {
+                        CancelParticipantPlan(participantPlans[j]);
+                        participantPlans.RemoveAt(j);
+                    }
                 if (entry.Reserved) NavigationGroupPlanner.Reserve(entry.Destination.Value, entry.Footprint, reservations, false);
                 units.RemoveAt(i);
             }
             if (units.Count == 0) { ClearUnits(); return; }
             planIndex %= units.Count;
+
             float now = Time.time;
-            if (followMouse) SampleFollowTarget(now);
-
             int frameBudget = Mathf.Clamp(expansionsPerFrame, 256, 24000);
-            var budget = new NavigationBudget(frameBudget);
-            int requestLimit = Mathf.Clamp(requestsPerFrame, 1, 12);
-            int requests = requestLimit;
-            planningClock.Restart();
-            AdvanceGuide(budget);
-            int budgetAfterGuide = budget.Remaining;
-            planningClock.Restart();
-
-            while (budget.Remaining > 0 && requests > 0 && guideSearch == null)
+            int requests = Mathf.Clamp(requestsPerFrame, 1, 12);
+            long started = Clock.GetTimestamp();
+            long allocated = GC.GetAllocatedBytesForCurrentThread();
+            long duration = (long)(Mathf.Clamp(planningMilliseconds, 0.25f, 8f) * Clock.Frequency / 1000.0);
+            frameWork.Reset(frameBudget, started + duration);
+            using (PlanningMarker.Auto())
             {
-                if (participantPlan == null && !StartParticipantPlan(now)) break;
-                if (!AdvanceParticipantPlan(budget, ref requests)) break;
+                if (followMouse) SampleFollowTarget(now);
+                AdvanceGuide(frameWork);
+                while (frameWork.CanContinue && requests > 0 && !GuideActive)
+                {
+                    if (participantPlans.Count < ConcurrentPlans && StartParticipantPlan(now))
+                    {
+                        participantPlans.Add(participantPlan);
+                        participantPlan = null;
+                    }
+                    if (participantPlans.Count == 0) break;
+                    participantPlan = participantPlans[0];
+                    participantPlans.RemoveAt(0);
+                    frameWork.BeginSlice(duration / ConcurrentPlans);
+                    bool done = AdvanceParticipantPlan(frameWork, ref requests);
+                    frameWork.EndSlice();
+                    if (!done) participantPlans.Add(participantPlan);
+                    participantPlan = null;
+                }
             }
-            frameExpanded = frameBudget - budget.Remaining;
+            frameExpanded = frameBudget - frameWork.Remaining;
             totalExpanded += frameExpanded;
-            targetExpanded += budgetAfterGuide - budget.Remaining;
-            if (budgetAfterGuide > budget.Remaining || requests < requestLimit)
-                targetMs += planningClock.Elapsed.TotalMilliseconds;
+            targetExpanded += frameExpanded;
+            lastPlanningMs = (Clock.GetTimestamp() - started) * 1000.0 / Clock.Frequency;
+            lastPlanningBytes = GC.GetAllocatedBytesForCurrentThread() - allocated;
+            sumPlanningMs += lastPlanningMs;
+            sumPlanningBytes += lastPlanningBytes;
+            peakPlanningMs = Math.Max(peakPlanningMs, lastPlanningMs);
+            peakPlanningBytes = Math.Max(peakPlanningBytes, lastPlanningBytes);
+            planningFrames++;
+            if (Time.unscaledTime >= nextReport)
+            {
+                nextReport = Time.unscaledTime + 0.25f;
+                UpdateTrafficReport();
+            }
         }
 
         private void SampleFollowTarget(float now)
         {
+            using var marker = HoverMarker.Auto();
             if (terrainCamera == null || !terrainCamera.TryGetCursorRay(out Ray ray, out Vector2 screen)
                 || (showPanel && Panel.Contains(new Vector2(screen.x, Screen.height - screen.y))))
             {
@@ -581,7 +673,7 @@ namespace GameDev.RtsRpg
             }
             // Coalesce queued input without restarting an already running guide.
             hoverTarget = guideFromHover && picked == guideTarget ? null : picked;
-            if (hoverTarget.HasValue && guideSearch == null) targetReport = $"Queued {picked}";
+            if (hoverTarget.HasValue && !GuideActive) targetReport = $"Queued {picked}";
         }
 
         private bool IsNearAcceptedTarget(Vector2Int cell)
@@ -595,54 +687,67 @@ namespace GameDev.RtsRpg
             bool hadHover = hoverTarget.HasValue || guideFromHover;
             hoverTarget = null;
             if (guideFromHover) CancelGuide();
-            if (hadHover && guideSearch == null)
+            if (hadHover && !GuideActive)
                 targetReport = acceptedTarget.HasValue ? "Accepted" : "No accepted target";
         }
 
+        private bool GuideActive => guideSearch != null || targetFlood != null;
+
         private void CancelGuide()
         {
+            guideSearch?.Dispose();
             guideSearch = null;
+            targetFlood = null;
             guideFromHover = false;
             guideExpanded = 0;
-            guideMs = 0;
+        }
+
+        private void ClearFields()
+        {
+            for (int i = 0; i < fields.Length; i++)
+            {
+                fields[i]?.Dispose();
+                fields[i] = null;
+            }
         }
 
         private bool DispatchPending() => targetArea != null && units.Exists(entry => !entry.LastAttempt.HasValue);
 
-        private int SearchLimit(NavigationFootprint size) => (int)Math.Min(1000000L,
-            (long)Grid.Surface.CellsX * Grid.Surface.CellsZ * (size.NeedsTurns ? 4 : 1));
+        private int SearchLimit(NavigationFootprint size) => Grid.Surface.CellsX * Grid.Surface.CellsZ * size.Orientations;
 
         private void AdvanceGuide(NavigationBudget budget)
         {
-            if (!armyDemo || participantPlan != null) return;
+            using var marker = GuideMarker.Auto();
+            if (!armyDemo || !budget.CanContinue) return;
             if (requestedTarget.HasValue && guideFromHover) CancelGuide();
-            if (guideSearch == null)
+            if (!GuideActive)
             {
                 bool fromHover = !requestedTarget.HasValue;
                 var target = fromHover ? hoverTarget : requestedTarget;
-                // A newer hover command starts only after all active members have
-                // had one completed assignment attempt for the accepted command.
                 if (!target.HasValue || (fromHover && (Time.frameCount < nextHoverGuideFrame || DispatchPending()))) return;
                 if (fromHover) hoverTarget = null; else requestedTarget = null;
                 if (!StartGuide(target.Value, fromHover)) return;
             }
 
-            int before = budget.Remaining;
-            var path = guideSearch.Advance(budget);
-            guideExpanded += before - budget.Remaining;
-            guideMs += planningClock.Elapsed.TotalMilliseconds;
-            if (path == null) return;
-            if (path.Status == NavigationStatus.Success)
+            if (guideSearch != null)
             {
-                AcceptTarget(guideTarget, path);
-                if (hoverTarget.HasValue && IsNearAcceptedTarget(hoverTarget.Value)) hoverTarget = null;
+                int before = budget.Remaining;
+                var path = guideSearch.Advance(budget);
+                guideExpanded += before - budget.Remaining;
+                if (path == null) return;
+                guideSearch = null;
+                if (path.Status != NavigationStatus.Success)
+                {
+                    RejectTarget(guideTarget, path.Status);
+                    if (guideFromHover) nextHoverGuideFrame = Time.frameCount + 2;
+                    CancelGuide();
+                    return;
+                }
+                targetFlood = new NavigationGroupPlanner.TargetFlood(Grid, guideTarget, Mathf.Clamp(groupRadius, 0, 32));
             }
-            else
-            {
-                RejectTarget(guideTarget, path.Status);
-                // Reserve a recovery frame even if another hover probe is queued.
-                if (guideFromHover) nextHoverGuideFrame = Time.frameCount + 2;
-            }
+            if (!targetFlood.Advance(budget)) return;
+            AcceptTarget(guideTarget, targetFlood);
+            if (hoverTarget.HasValue && IsNearAcceptedTarget(hoverTarget.Value)) hoverTarget = null;
             CancelGuide();
         }
 
@@ -654,14 +759,22 @@ namespace GameDev.RtsRpg
                 RejectTarget(target, NavigationStatus.InvalidGoal);
                 return false;
             }
-            for (int i = 0; i < units.Count; i++)
+            var anchors = new HashSet<int>();
+            var min = new Vector2Int(Grid.Surface.CellsX, Grid.Surface.CellsZ);
+            var max = Vector2Int.zero;
+            foreach (var entry in units)
             {
-                var startPose = new NavigationPose(units[(planIndex + i) % units.Count].Unit.Pose.Cell);
-                if (!Grid.CanOccupy(startPose, small)) continue;
+                var pose = new NavigationPose(entry.Unit.Pose.Cell);
+                if (!Grid.CanOccupy(pose, small)) continue;
+                anchors.Add(Grid.StateId(pose));
+                min = Vector2Int.Min(min, pose.Cell);
+                max = Vector2Int.Max(max, pose.Cell);
+            }
+            if (anchors.Count != 0)
+            {
                 guideTarget = target;
                 guideFromHover = fromHover;
-                guideSearch = finder.BeginSearch(new NavigationRequest(new NavigationPose(target),
-                    startPose, small, SearchLimit(small)));
+                guideSearch = finder.BeginGuide(target, anchors, new RectInt(min, max - min + Vector2Int.one));
                 targetReport = $"Checking {target}";
                 return true;
             }
@@ -676,25 +789,37 @@ namespace GameDev.RtsRpg
             targetReport = $"Target {target}: {status}.";
         }
 
-        private void AcceptTarget(Vector2Int target, NavigationPath guide)
+        private void AcceptTarget(Vector2Int target, NavigationGroupPlanner.TargetFlood area)
         {
+            var previous = acceptedTarget;
             acceptedTarget = goal = target;
             lastRejectedTarget = null;
             targetReport = "Accepted";
-            targetArea = planner.BuildTargetArea(target, Mathf.Clamp(groupRadius, 0, 32));
-            sharedCorridor.Clear();
-            foreach (var point in guide.Points)
-            for (int z = -2; z <= 2; z++)
-            for (int x = -2; x <= 2; x++) sharedCorridor.Add(point.Pose.Cell + new Vector2Int(x, z));
+            CancelParticipantPlans();
+            ClearFields();
+            acceptedArea = area;
+            targetArea = area.Cells;
             foreach (var entry in units)
             {
-                entry.Assigned = false;
-                entry.Failures = 0;
+                // Keep confirmed slots on the advancing side of a small retarget.
+                // Trailing members still receive new orders as the cursor moves.
+                bool keep = false;
+                if (previous.HasValue && target != previous.Value && entry.Reserved && entry.Destination.HasValue
+                    && (target - previous.Value).sqrMagnitude <= 64)
+                {
+                    var destination = entry.Destination.Value;
+                    int distance = (destination.Cell - target).sqrMagnitude;
+                    keep = distance <= 64 && distance <= (destination.Cell - previous.Value).sqrMagnitude
+                        && area.Contains(destination.Cell)
+                        && (entry.Unit.HasRoute || (entry.Unit.State == UnitMovement.Motion.Arrived
+                            && entry.Unit.Pose.Equals(destination)));
+                }
+                entry.Assigned = keep;
+                entry.Failures = entry.NextCandidate = 0;
                 entry.RetryAt = 0;
-                entry.LastAttempt = null;
+                entry.LastAttempt = keep ? NavigationStatus.Success : null;
             }
-            targetExpanded = guide.Expanded;
-            targetMs = guideMs;
+            targetExpanded = 0;
         }
 
         private bool StartParticipantPlan(float now)
@@ -705,9 +830,7 @@ namespace GameDev.RtsRpg
                 var entry = units[planIndex];
                 planIndex = (planIndex + 1) % units.Count;
                 if (dispatch && entry.LastAttempt.HasValue) continue;
-                if (!entry.Unit.CanPlan || entry.RetryAt > now) continue;
-                if (entry.LastAttempt == NavigationStatus.BudgetExceeded
-                    && entry.LastTrafficRevision == navigation.TrafficRevision) continue;
+                if (entry.Unit.Planning || !entry.Unit.CanPlan || entry.RetryAt > now) continue;
                 if (entry.Failures >= 3 && entry.LastAttempt == NavigationStatus.NoPath
                     && entry.LastTrafficRevision == navigation.TrafficRevision) continue;
                 bool needsSlot = targetArea != null && !entry.Assigned;
@@ -717,14 +840,22 @@ namespace GameDev.RtsRpg
 
                 var unit = entry.Unit;
                 bool avoidAllies = unit.Recovering && entry.Failures % 3 != 2;
+                bool recovery = unit.Recovering && (!needsSlot || entry.LastAttempt.HasValue);
+                bool startsInside = needsSlot && !recovery && acceptedArea.Contains(unit.Pose.Cell);
+                var field = needsSlot && !recovery && !startsInside
+                    ? fields[unit.Footprint.Graph] ??= new NavigationPathfinder.ApproachField(finder, unit.Footprint, acceptedArea.EntryCells)
+                    : null;
                 participantPlan = new ParticipantPlan
                 {
                     Entry = entry,
-                    Candidates = needsSlot ? planner.DestinationCandidates(unit.Footprint, targetArea, reservations,
-                        entry.Reserved ? entry.Destination : null).GetEnumerator() : null,
+                    NeedsSlot = needsSlot,
+                    StartsInside = startsInside,
+                    CandidateIndex = needsSlot ? entry.NextCandidate : 0,
+                    Field = field,
+                    Approach = unit.Pose,
                     Remaining = SearchLimit(unit.Footprint),
                     TrafficRevision = navigation.TrafficRevision,
-                    AllowsEdge = (from, to) => unit.AllowsSearchEdge(from, to, avoidAllies)
+                    AllowsEdge = recovery ? (from, to) => unit.AllowsSearchEdge(from, to, avoidAllies) : null
                 };
                 unit.Planning = true;
                 return true;
@@ -732,124 +863,215 @@ namespace GameDev.RtsRpg
             return false;
         }
 
-        private void CancelParticipantPlan()
+        private void CancelParticipantPlans()
         {
-            if (participantPlan == null) return;
-            if (participantPlan.Entry.Unit != null) participantPlan.Entry.Unit.Planning = false;
-            participantPlan.Candidates?.Dispose();
-            participantPlan = null;
+            foreach (var plan in participantPlans) CancelParticipantPlan(plan);
+            participantPlans.Clear();
+        }
+
+        private static void CancelParticipantPlan(ParticipantPlan plan)
+        {
+            if (plan.Entry.Unit != null) plan.Entry.Unit.Planning = false;
+            plan.Search?.Dispose();
         }
 
         private bool AdvanceParticipantPlan(NavigationBudget budget, ref int requests)
         {
+            using var marker = ParticipantMarker.Auto();
             const int candidateLimit = 48;
             var plan = participantPlan;
             var unit = plan.Entry.Unit;
-            while (requests > 0 && budget.Remaining > 0)
+            if (plan.Field != null && !plan.ApproachReady)
             {
+                if (plan.Prefix == null)
+                {
+                    if (!plan.Field.AdvanceTo(unit.Pose, budget, ref plan.FieldLimit, out bool reached)) return false;
+                    if (!reached) plan.Field = null;
+                    else plan.Prefix = new List<NavigationPoint> { Grid.Point(unit.Pose, unit.Footprint) };
+                }
+                if (plan.Field != null)
+                {
+                    while (plan.Field.TryNext(plan.Approach, out var next))
+                    {
+                        if (!budget.HasTime) return false;
+                        Vector2Int delta = next.Cell - plan.Approach.Cell;
+                        plan.PrefixCost += delta == Vector2Int.zero ? 5 : delta.x != 0 && delta.y != 0 ? 14 : 10;
+                        plan.Approach = next;
+                        plan.Prefix.Add(Grid.Point(next, unit.Footprint));
+                    }
+                }
+                plan.ApproachPointCount = plan.Prefix?.Count ?? 0;
+                plan.ApproachReady = true;
+            }
+
+            while (requests > 0 && budget.CanContinue)
+            {
+                if (plan.Suffix != null) return FinishSharedRoute(plan, unit, budget);
                 if (plan.Search == null)
                 {
-                    NavigationPose destination;
-                    if (plan.Candidates == null) destination = plan.Entry.Destination.Value;
-                    else if (!plan.Candidates.MoveNext()) return FinishParticipantPlan(NavigationStatus.NoPath);
-                    else destination = plan.Candidates.Current;
-                    if (plan.Tried >= candidateLimit || plan.Remaining == 0)
-                        return FinishParticipantPlan(NavigationStatus.BudgetExceeded);
+                    if (plan.Remaining == 0) return FinishParticipantPlan(NavigationStatus.BudgetExceeded);
+                    if (!plan.HasCandidate)
+                    {
+                        if (plan.Tried == candidateLimit) return FinishParticipantPlan(NavigationStatus.BudgetExceeded);
+                        if (!plan.NeedsSlot) plan.Goal = plan.Entry.Destination.Value;
+                        else
+                        {
+                            int limit = targetArea.Count * unit.Footprint.Orientations;
+                            while (plan.CandidateIndex < limit)
+                            {
+                                if (!budget.HasTime) return false;
+                                if (planner.TryCandidate(unit.Footprint, targetArea, reservations,
+                                    plan.Entry.Reserved ? plan.Entry.Destination : null, ref plan.CandidateIndex, out plan.Goal,
+                                    plan.Approach.Facing))
+                                {
+                                    plan.HasCandidate = true;
+                                    break;
+                                }
+                            }
+                            if (!plan.HasCandidate)
+                                return FinishParticipantPlan(plan.Entry.NextCandidate != 0 ? NavigationStatus.BudgetExceeded
+                                    : plan.Tried == 0 ? NavigationStatus.InvalidGoal : NavigationStatus.NoPath);
+                        }
+                        plan.Tried++;
+                        plan.HasCandidate = true;
+                        plan.LocalSearch = plan.StartsInside || plan.Prefix != null;
+                    }
 
-                    plan.Tried++;
+                    var from = plan.LocalSearch ? plan.Approach : unit.Pose;
+                    int limitForSearch = plan.LocalSearch ? Math.Min(512, plan.Remaining) : plan.Remaining;
                     requests--;
-                    plan.Search = finder.BeginSearch(new NavigationRequest(unit.Pose, destination,
-                        unit.Footprint, plan.Remaining), sharedCorridor, plan.AllowsEdge);
+                    if (!plan.LocalSearch) fullSearches++;
+                    plan.Search = finder.BeginSearch(new NavigationRequest(from, plan.Goal,
+                        unit.Footprint, limitForSearch), allowsEdge: plan.AllowsEdge);
                 }
 
                 int before = budget.Remaining;
                 var path = plan.Search.Advance(budget);
-                plan.Remaining -= before - budget.Remaining;
+                if (!plan.LocalSearch) plan.Remaining -= before - budget.Remaining;
                 if (path == null) return false;
                 plan.Search = null;
-                if (path.Status == NavigationStatus.Success && unit.Assign(path))
+                if (path.Status == NavigationStatus.Success)
                 {
-                    if (plan.Candidates != null)
-                    {
-                        var entry = plan.Entry;
-                        if (entry.Reserved)
-                            NavigationGroupPlanner.Reserve(entry.Destination.Value, unit.Footprint, reservations, false);
-                        entry.Destination = path.Points[path.Points.Count - 1].Pose;
-                        NavigationGroupPlanner.Reserve(entry.Destination.Value, unit.Footprint, reservations);
-                        entry.Reserved = entry.Assigned = true;
-                    }
-                    return FinishParticipantPlan(NavigationStatus.Success);
+                    if (!plan.LocalSearch || plan.Prefix == null) return AssignParticipant(plan, unit, path);
+                    plan.Suffix = path;
+                    plan.SuffixIndex = 1;
+                    return FinishSharedRoute(plan, unit, budget);
                 }
-                if (path.Status != NavigationStatus.NoPath || plan.Candidates == null)
-                    return FinishParticipantPlan(path.Status == NavigationStatus.Success ? NavigationStatus.Stale : path.Status);
+                if (plan.LocalSearch)
+                {
+                    // The bounded local pass is an optimisation. Try the same
+                    // slot with unrestricted A* before rejecting it.
+                    plan.LocalSearch = false;
+                    continue;
+                }
+                if (path.Status != NavigationStatus.NoPath || !plan.NeedsSlot)
+                    return FinishParticipantPlan(path.Status);
+                plan.HasCandidate = false;
             }
             return false;
+        }
+
+        private bool FinishSharedRoute(ParticipantPlan plan, UnitMovement unit, NavigationBudget budget)
+        {
+            while (plan.SuffixIndex < plan.Suffix.Points.Count)
+            {
+                if (!budget.HasTime) return false;
+                plan.Prefix.Add(plan.Suffix.Points[plan.SuffixIndex++]);
+            }
+            var path = new NavigationPath(Grid, NavigationStatus.Success, "Shared approach and exact destination.",
+                plan.Prefix, plan.Suffix.Expanded, plan.PrefixCost + plan.Suffix.Cost, unit.Footprint);
+            return AssignParticipant(plan, unit, path);
+        }
+
+        private bool AssignParticipant(ParticipantPlan plan, UnitMovement unit, NavigationPath path)
+        {
+            var entry = plan.Entry;
+            if (plan.NeedsSlot && !NavigationGroupPlanner.CanReserve(plan.Goal, unit.Footprint, reservations,
+                entry.Reserved ? entry.Destination : null))
+            {
+                // A different sliced plan confirmed this slot while this one was suspended.
+                plan.HasCandidate = false;
+                plan.Suffix = null;
+                if (plan.Prefix != null)
+                    plan.Prefix.RemoveRange(plan.ApproachPointCount, plan.Prefix.Count - plan.ApproachPointCount);
+                return false;
+            }
+            if (!unit.Assign(path)) return FinishParticipantPlan(NavigationStatus.Stale);
+            assignments++;
+            if (plan.Suffix != null && plan.ApproachPointCount > 1) sharedAssignments++;
+            if (plan.NeedsSlot)
+            {
+                if (entry.Reserved)
+                    NavigationGroupPlanner.Reserve(entry.Destination.Value, unit.Footprint, reservations, false);
+                entry.Destination = path.Points[path.Points.Count - 1].Pose;
+                NavigationGroupPlanner.Reserve(entry.Destination.Value, unit.Footprint, reservations);
+                entry.Reserved = entry.Assigned = true;
+            }
+            return FinishParticipantPlan(NavigationStatus.Success);
         }
 
         private bool FinishParticipantPlan(NavigationStatus status)
         {
             var plan = participantPlan;
             var entry = plan.Entry;
+            if (status == NavigationStatus.NoPath && plan.AllowsEdge != null
+                && plan.TrafficRevision != navigation.TrafficRevision)
+                status = NavigationStatus.Stale;
             entry.LastAttempt = status;
-            // A multi-frame search sees live traffic. A failure must be eligible
-            // for retry if occupancy changed while its frontier was suspended.
+            entry.NextCandidate = plan.NeedsSlot && status == NavigationStatus.BudgetExceeded
+                && plan.Tried > 1 && plan.CandidateIndex < targetArea.Count * entry.Footprint.Orientations
+                ? plan.CandidateIndex - (plan.HasCandidate ? 1 : 0) : 0;
+            // Live traffic can change while a recovery search is suspended.
             entry.LastTrafficRevision = plan.TrafficRevision;
             entry.Failures = status == NavigationStatus.Success ? 0 : Math.Min(entry.Failures + 1, 8);
-            if (plan.Candidates == null && targetArea != null && entry.Failures == 3)
+            if (!plan.NeedsSlot && targetArea != null && entry.Failures == 3)
             {
                 entry.Assigned = false;
                 entry.Failures = 0;
             }
             entry.RetryAt = Time.time + 0.18f * (1 << Math.Min(4, entry.Failures));
             if (status != NavigationStatus.Success) entry.Unit.ReportFailure(status);
-            CancelParticipantPlan();
+            CancelParticipantPlan(plan);
             return true;
         }
 
-        private void DrawTrafficReport()
+        private void UpdateTrafficReport()
         {
-            int routes = 0, waiting = 0, blocked = 0, arrived = 0, budget = 0, noPath = 0, accepted = 0, attempted = 0;
+            int routes = 0, waiting = 0, blocked = 0, arrived = 0, capped = 0, noPath = 0, accepted = 0, attempted = 0;
             foreach (var entry in units)
             {
                 var unit = entry.Unit;
                 if (unit == null || !unit.isActiveAndEnabled) continue;
                 if (unit.HasRoute) routes++;
                 if (unit.State == UnitMovement.Motion.Arrived) arrived++;
-                if (unit.State == UnitMovement.Motion.Waiting || unit.State == UnitMovement.Motion.Yielding
-                    || unit.State == UnitMovement.Motion.RepathPending || unit.Planning || (!entry.Assigned && targetArea != null
-                    && !entry.LastAttempt.HasValue)) waiting++;
+                if (unit.Recovering || unit.State == UnitMovement.Motion.Yielding || unit.Planning
+                    || (targetArea != null && !entry.LastAttempt.HasValue)) waiting++;
                 if (unit.State == UnitMovement.Motion.Blocked || unit.State == UnitMovement.Motion.Invalidated) blocked++;
-                if (entry.LastAttempt == NavigationStatus.BudgetExceeded) budget++;
+                if (entry.LastAttempt == NavigationStatus.BudgetExceeded) capped++;
                 if (entry.LastAttempt == NavigationStatus.NoPath || entry.LastAttempt == NavigationStatus.InvalidGoal
                     || entry.LastAttempt == NavigationStatus.InvalidStart) noPath++;
                 if (entry.Assigned) accepted++;
                 if (entry.LastAttempt.HasValue) attempted++;
             }
-            GUILayout.Label($"{units.Count} units · routes {routes} · waiting/recovery {waiting} · arrived {arrived} · blocked {blocked}");
-            if (participantPlan != null)
-                GUILayout.Label($"Search in progress · candidate {participantPlan.Tried} · work left {participantPlan.Remaining}");
-            if (!armyDemo)
-            {
-                GUILayout.Label($"NoPath/invalid {noPath} · BudgetExceeded {budget} · expansions {frameExpanded}/{totalExpanded}");
-                return;
-            }
             string target = acceptedTarget.HasValue
                 ? $"{acceptedTarget.Value}, level {Grid.Surface.GetCell(acceptedTarget.Value.x, acceptedTarget.Value.y).Level}"
                 : "none";
-            GUILayout.Label($"Follow Mouse {(followMouse ? "ON" : "OFF")} · target {target} · {targetReport}");
-            string next = hoverTarget.HasValue ? $" · queued {hoverTarget.Value}" : "";
-            if (guideSearch != null) GUILayout.Label($"Checking {guideTarget} · expansions {guideExpanded}{next}");
-            else if (hoverTarget.HasValue) GUILayout.Label($"Next target {hoverTarget.Value}");
-            GUILayout.Label($"Dispatch {attempted}/{units.Count} · assigned {accepted} · NoPath/invalid {noPath} · BudgetExceeded {budget}");
-            GUILayout.Label($"Planning {targetMs:F1} ms · expansions frame {frameExpanded}, target {targetExpanded}, total {totalExpanded}");
+            trafficReport = $"{units.Count} units · routes {routes} · waiting/recovery {waiting} · arrived {arrived} · blocked {blocked}\n"
+                + (armyDemo ? $"Target {target} · {targetReport} · queued {hoverTarget}\nDispatch {attempted}/{units.Count} · assigned {accepted} · " : "")
+                + $"NoPath/invalid {noPath} · BudgetExceeded {capped} · active {(GuideActive ? 1 : 0) + participantPlans.Count}"
+                + (GuideActive ? $" · guide expansions {guideExpanded}" : "");
+            planningReport = $"Planning ms last/mean/max {lastPlanningMs:F2}/{sumPlanningMs / planningFrames:F2}/{peakPlanningMs:F2} · "
+                + $"B {lastPlanningBytes}/{sumPlanningBytes / planningFrames}/{peakPlanningBytes}\n"
+                + $"Expansions {frameExpanded}/{targetExpanded}/{totalExpanded} · assignments {assignments} (shared {sharedAssignments}) · A* {fullSearches}";
         }
 
         private void OnGUI()
         {
             if (!showPanel || !Application.isPlaying) return;
+            using var marker = GuiMarker.Auto();
             GUILayout.BeginArea(Panel, GUI.skin.box);
             scroll = GUILayout.BeginScrollView(scroll);
-            GUILayout.Label("Stage 05.1 — Terrain and group traffic");
+            GUILayout.Label("Stage 05.2 — Terrain and group traffic");
             GUILayout.Label(builder.BuildReport ?? "Terrain unavailable.");
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Basin")) Landmark(0);
@@ -860,6 +1082,7 @@ namespace GameDev.RtsRpg
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Army (64)")) Army();
+            if (GUILayout.Button("Army (100)")) Army(100);
             if (GUILayout.Button("Allied lane")) Traffic(0);
             if (GUILayout.Button("Enemy lane")) Traffic(1);
             if (GUILayout.Button("Frame map")) FrameTerrain();
@@ -893,7 +1116,8 @@ namespace GameDev.RtsRpg
                         }
                     }
                 }
-                DrawTrafficReport();
+                GUILayout.Label(trafficReport ?? "Waiting for planning.");
+                GUILayout.Label(planningReport ?? "");
             }
             GUILayout.Label("Cyan/colours: paths + footprints; red: cliffs/edges; magenta: static blockers.");
             GUILayout.BeginHorizontal();
@@ -922,7 +1146,12 @@ namespace GameDev.RtsRpg
             GUILayout.EndHorizontal();
             bool visible = GUILayout.Toggle(showBoundaries, "Show impassable geometry (display capped at 192 segments)");
             if (visible != showBoundaries) { showBoundaries = visible; ClearLines(); DrawGeometry(); paths.Clear(); report = "Display changed; press Replan to redraw routes."; }
-            GUILayout.Label($"Request: {start} {startFacing} → {goal} {goalFacing}; footprint {footprint}");
+            if (Event.current.type == EventType.Layout && Time.unscaledTime >= nextRequestReport)
+            {
+                requestReport = $"Request: {start} {startFacing} → {goal} {goalFacing}; footprint {footprint}";
+                nextRequestReport = Time.unscaledTime + 0.25f;
+            }
+            GUILayout.Label(requestReport ?? "");
             GUILayout.Label(report ?? "No navigation snapshot.");
             GUILayout.EndScrollView(); GUILayout.EndArea();
         }

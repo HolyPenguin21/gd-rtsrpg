@@ -1,3 +1,4 @@
+using Unity.Profiling;
 using UnityEngine;
 
 namespace GameDev.RtsRpg
@@ -5,6 +6,7 @@ namespace GameDev.RtsRpg
     /// <summary>Executes validated edges and local sidesteps on the current terrain snapshot.</summary>
     public sealed class UnitMovement : MonoBehaviour
     {
+        private static readonly ProfilerMarker UpdateMarker = new("Navigation.UnitMovement");
         public enum Motion { Moving, Yielding, Waiting, RepathPending, Blocked, Arrived, Invalidated }
         private TerrainNavigation navigation;
         private NavigationGrid grid;
@@ -24,7 +26,7 @@ namespace GameDev.RtsRpg
         internal bool AtAnchor => progress == 0f && !yieldTarget.HasValue && !retreating;
         internal bool HasRoute => path != null && path.IsCurrent;
         internal Rect Occupancy { get; private set; }
-        // The coordinator holds at most one anchored participant while a search spans frames.
+        // The coordinator holds this anchor while its sliced search is active.
         internal bool Planning { get; set; }
 
         internal bool Reserves(Rect area)
@@ -32,14 +34,14 @@ namespace GameDev.RtsRpg
             if (Overlaps(Occupancy, area)) return true;
             if (progress == 0f) return false;
             var to = yieldTarget ?? path.Points[next].Pose;
-            return Overlaps(Sweep(Centre(restingPose), (int)restingPose.Facing * 90f,
-                Centre(to), (int)to.Facing * 90f, restingPose.Facing != to.Facing), area);
+            return Overlaps(Sweep(Centre(restingPose), restingPose.Yaw,
+                Centre(to), to.Yaw, restingPose.Facing != to.Facing), area);
         }
 
         public bool Begin(TerrainNavigation owner, NavigationPath route, NavigationFootprint size, int faction = 0)
         {
             if (navigation != null || owner == null || owner.Grid == null || route == null
-                || !route.IsCurrent || !route.BelongsTo(owner.Grid) || route.Points.Count == 0
+                || !route.IsCurrent || !route.BelongsTo(owner.Grid, size) || route.Points.Count == 0
                 || !owner.Grid.CanOccupy(route.Points[0].Pose, size)) return false;
             navigation = owner;
             grid = owner.Grid;
@@ -49,7 +51,7 @@ namespace GameDev.RtsRpg
             restingPose = route.Points[0].Pose;
             centre = Centre(restingPose);
             revision = grid.Revision;
-            facing = (int)restingPose.Facing * 90f;
+            facing = restingPose.Yaw;
             Occupancy = Envelope(centre, facing, false);
             if (Blocker(Occupancy) != null || !Assign(route)) { navigation = null; return false; }
             navigation.Register(this, centre);
@@ -59,10 +61,8 @@ namespace GameDev.RtsRpg
 
         internal bool Assign(NavigationPath route)
         {
-            if (!AtAnchor || !route.IsCurrent || !route.BelongsTo(grid) || route.Points.Count == 0
+            if (!AtAnchor || !route.IsCurrent || !route.BelongsTo(grid, Footprint) || route.Points.Count == 0
                 || !route.Points[0].Pose.Equals(restingPose)) return false;
-            for (int i = 1; i < route.Points.Count; i++)
-                if (!CanTraverse(route.Points[i - 1].Pose, route.Points[i].Pose)) return false;
             revision = grid.Revision;
             path = route;
             next = 1;
@@ -91,13 +91,14 @@ namespace GameDev.RtsRpg
             State = Motion.Invalidated;
         }
 
-        private Vector2 Centre(NavigationPose pose) => (Vector2)pose.Cell + (Vector2)Footprint.Size(pose.Facing) * 0.5f;
+        private Vector2 Centre(NavigationPose pose) => pose.Centre(Footprint);
         private bool CanTraverse(NavigationPose from, NavigationPose to) => from.Facing == to.Facing
             ? grid.CanStep(from, to, Footprint) : grid.CanTurn(from, to, Footprint);
 
         private void Update()
         {
             if (navigation == null || Time.deltaTime <= 0f || !Application.isFocused) return;
+            using var marker = UpdateMarker.Auto();
             if (grid != navigation.Grid || !grid.IsAlive || !navigation.HasCurrentTransform)
             {
                 State = Motion.Invalidated;
@@ -107,7 +108,9 @@ namespace GameDev.RtsRpg
             if (grid.Revision != revision)
             {
                 // Finish retreat only along an edge that remains valid in the new revision.
-                if (progress > 0 && !CanTraverse(restingPose, yieldTarget ?? path.Points[next].Pose))
+                if (progress > 0 && !(yieldTarget.HasValue
+                    ? grid.CanYieldStep(restingPose, yieldTarget.Value, Footprint)
+                    : CanTraverse(restingPose, path.Points[next].Pose)))
                 {
                     Status = NavigationStatus.Stale;
                     State = Motion.Invalidated;
@@ -133,11 +136,11 @@ namespace GameDev.RtsRpg
             float t = Mathf.MoveTowards(progress, retreating ? 0f : 1f,
                 step / Mathf.Max(distance, turning ? 1f : 0.01f));
             Vector2 proposed = Vector2.Lerp(a, b, t);
-            float angle = Mathf.LerpAngle((int)restingPose.Facing * 90f, (int)to.Facing * 90f, t);
+            float angle = Mathf.LerpAngle(restingPose.Yaw, to.Yaw, t);
             // Reserve enough room for a full turn before entering it. During motion
             // the old anchor stays occupied so a retreat cannot be cut off by followers.
             Rect sweep = turning
-                ? Sweep(a, facing, b, angle, true)
+                ? Sweep(a, restingPose.Yaw, b, to.Yaw, true)
                 : Sweep(centre, facing, proposed, angle, false);
             var obstruction = retreating ? null : Blocker(sweep);
             if (obstruction != null)
@@ -161,7 +164,6 @@ namespace GameDev.RtsRpg
             {
                 progress = 0f;
                 restingPose = to;
-                navigation.NotifyTrafficChanged();
                 if (yieldTarget.HasValue)
                 {
                     AbandonEdge();
@@ -169,8 +171,10 @@ namespace GameDev.RtsRpg
                 }
                 else next++;
             }
-            Occupancy = progress == 0f ? Envelope(centre, facing, false)
-                : turning ? sweep : Sweep(a, (int)restingPose.Facing * 90f, centre, facing, false);
+            Rect occupancy = progress == 0f ? Envelope(centre, facing, false)
+                : turning ? sweep : Sweep(a, restingPose.Yaw, centre, facing, false);
+            if (Occupancy != occupancy) navigation.NotifyTrafficChanged();
+            Occupancy = occupancy;
             navigation.Register(this, centre);
         }
 
@@ -200,7 +204,7 @@ namespace GameDev.RtsRpg
             {
                 var delta = i == 0 ? side : i == 1 ? -side : forward;
                 var target = new NavigationPose(restingPose.Cell + delta, restingPose.Facing);
-                if (!CanTraverse(restingPose, target)
+                if (!grid.CanYieldStep(restingPose, target, Footprint)
                     || Vector2.Dot(Centre(target) - requester.centre, (Vector2)delta) <= 0f) continue;
                 var obstruction = Blocker(Sweep(centre, facing, Centre(target), facing, false));
                 if (obstruction == null)
@@ -220,7 +224,7 @@ namespace GameDev.RtsRpg
         internal bool AllowsSearchEdge(NavigationPose from, NavigationPose to, bool avoidAllies)
         {
             bool turn = from.Facing != to.Facing;
-            Rect sweep = Sweep(Centre(from), (int)from.Facing * 90f, Centre(to), (int)to.Facing * 90f, turn);
+            Rect sweep = Sweep(Centre(from), from.Yaw, Centre(to), to.Yaw, turn);
             return navigation.FindContact(this, sweep, search: true, avoidAllies: avoidAllies) == null;
         }
 
@@ -245,11 +249,16 @@ namespace GameDev.RtsRpg
 
         private Rect Envelope(Vector2 at, float angle, bool turning)
         {
-            float radians = angle * Mathf.Deg2Rad;
-            float sin = Mathf.Abs(Mathf.Sin(radians)), cos = Mathf.Abs(Mathf.Cos(radians));
             float radius = Mathf.Sqrt(Footprint.Width * Footprint.Width + Footprint.Length * Footprint.Length);
-            var size = turning ? Vector2.one * radius : new Vector2(
-                Footprint.Width * cos + Footprint.Length * sin, Footprint.Width * sin + Footprint.Length * cos);
+            Vector2 size;
+            if (turning) size = Vector2.one * radius;
+            else if (!Footprint.NeedsTurns) size = new Vector2(Footprint.Width, Footprint.Length);
+            else
+            {
+                int heading = Mathf.RoundToInt(angle / 45f) & 7;
+                size = (heading & 1) != 0 ? Vector2.one * (3f * 0.70710678f)
+                    : (heading & 2) == 0 ? new Vector2(1, 2) : new Vector2(2, 1);
+            }
             return new Rect(at - size * 0.5f, size);
         }
 
