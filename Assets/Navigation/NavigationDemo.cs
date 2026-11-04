@@ -959,6 +959,7 @@ namespace GameDev.RtsRpg
             }
             if (units.Count == 0) { ClearUnits(); return; }
             planIndex %= units.Count;
+            AdoptSettledDestinations();
 
             float now = Time.time;
             frameTimes[frameTimeCursor] = Time.unscaledDeltaTime * 1000f;
@@ -1022,6 +1023,59 @@ namespace GameDev.RtsRpg
             {
                 nextReport = Time.unscaledTime + 0.25f;
                 UpdateTrafficReport();
+            }
+        }
+
+        // Arrival by contact: a unit that settled near its slot keeps its
+        // actual pose as the destination when that footprint is not reserved
+        // by anyone else; otherwise it keeps the original slot and is routed
+        // there again by the normal dispatcher.
+        private void AdoptSettledDestinations()
+        {
+            foreach (var entry in units)
+            {
+                var unit = entry.Unit;
+                if (!unit.Settled || unit.State != UnitMovement.Motion.Arrived || !entry.Destination.HasValue
+                    || unit.Pose.Equals(entry.Destination.Value)) continue;
+                var own = entry.Reserved ? entry.Destination : null;
+                if (!NavigationGroupPlanner.CanReserve(unit.Pose, entry.Footprint, reservations, own))
+                {
+                    // Slot exchange before the final jam: a slot this unit now
+                    // physically covers is released from an owner that has not
+                    // reached it; that owner is assigned a new slot. A slot whose
+                    // owner stands on it is never taken.
+                    var area = new RectInt(unit.Pose.Cell, entry.Footprint.Size(unit.Pose.Facing));
+                    bool held = false;
+                    foreach (var other in units)
+                    {
+                        if (other == entry || !other.Reserved || !other.Destination.HasValue) continue;
+                        var slot = other.Destination.Value;
+                        if (!area.Overlaps(new RectInt(slot.Cell, other.Footprint.Size(slot.Facing)))) continue;
+                        if (other.Unit != null && other.Unit.State == UnitMovement.Motion.Arrived && other.Unit.Pose.Equals(slot))
+                        {
+                            held = true;
+                            break;
+                        }
+                    }
+                    if (held) continue;
+                    foreach (var other in units)
+                    {
+                        if (other == entry || !other.Reserved || !other.Destination.HasValue) continue;
+                        var slot = other.Destination.Value;
+                        if (!area.Overlaps(new RectInt(slot.Cell, other.Footprint.Size(slot.Facing)))) continue;
+                        ClearDestination(other);
+                        other.LastAttempt = null;
+                        other.RetryAt = 0f;
+                        other.Failures = other.NextCandidate = 0;
+                        other.Unit.StopAfterCurrentEdge();
+                    }
+                    if (!NavigationGroupPlanner.CanReserve(unit.Pose, entry.Footprint, reservations, own)) continue;
+                }
+                if (entry.Reserved) NavigationGroupPlanner.Reserve(entry.Destination.Value, entry.Footprint, reservations, false);
+                entry.Destination = unit.Pose;
+                NavigationGroupPlanner.Reserve(unit.Pose, entry.Footprint, reservations);
+                entry.Reserved = true;
+                entry.SlotRoute = null;
             }
         }
 
@@ -1234,19 +1288,11 @@ namespace GameDev.RtsRpg
             acceptedArea = area;
             targetArea = area.Cells;
             launchCursor = 0;
-            Vector2 groupCentre = Vector2.zero;
-            int count = 0;
-            foreach (var entry in units)
-                if (InDispatch(entry)) { groupCentre += entry.Unit.PlanningPose.Centre(entry.Footprint); count++; }
-            groupCentre /= Mathf.Max(1, count);
-            Vector2 forward = ((Vector2)target + Vector2.one * 0.5f - groupCentre).normalized;
-            Vector2 across = new Vector2(-forward.y, forward.x);
+            var formation = Formation(target, entry => InDispatch(entry), entry => entry.Unit.PlanningPose);
             foreach (var entry in units)
             {
                 if (manualDispatch && !NeedsManualDestination(entry)) continue;
-                float lateral = Vector2.Dot(entry.Unit.PlanningPose.Centre(entry.Footprint) - groupCentre, across);
-                entry.SlotBias = across * Mathf.Clamp(lateral, -groupRadius * 0.7f, groupRadius * 0.7f);
-                entry.Unit.ConfigureFormation(lateral / Mathf.Max(1f, groupRadius * 0.7f));
+                entry.SlotBias = (entry.Unit.PlanningPose.Centre(entry.Footprint) - formation.Centre) * formation.Scale;
                 bool keep = false;
                 if (local && previous.HasValue && entry.Reserved && entry.Destination.HasValue)
                 {
@@ -1275,16 +1321,41 @@ namespace GameDev.RtsRpg
             targetExpanded = 0;
         }
 
+        // Formation-preserving destinations (SC2-like): when the target lies
+        // outside the group's bounds, every unit keeps its full 2D offset from
+        // the group centre, scaled down uniformly to fit the target area.
+        // Paths stay parallel instead of crossing inside the crowd. A target
+        // inside the group contracts the units toward it, keeping their bearing.
+        private (Vector2 Centre, float Scale) Formation(Vector2Int target, Predicate<Participant> member,
+            Func<Participant, NavigationPose> pose)
+        {
+            Vector2 centre = Vector2.zero, min = Vector2.positiveInfinity, max = Vector2.negativeInfinity;
+            int count = 0;
+            foreach (var entry in units)
+            {
+                if (!member(entry)) continue;
+                Vector2 at = pose(entry).Centre(entry.Footprint);
+                centre += at;
+                min = Vector2.Min(min, at);
+                max = Vector2.Max(max, at);
+                count++;
+            }
+            if (count == 0) return (Vector2.zero, 0f);
+            centre /= count;
+            Vector2 goal = (Vector2)target + Vector2.one * 0.5f;
+            // Target inside the group: contract toward it. Each unit keeps its
+            // bearing from the target, so slots lie on the side it comes from.
+            if (goal.x >= min.x && goal.x <= max.x && goal.y >= min.y && goal.y <= max.y) centre = goal;
+            float extent = 0f;
+            foreach (var entry in units)
+                if (member(entry)) extent = Mathf.Max(extent, (pose(entry).Centre(entry.Footprint) - centre).magnitude);
+            float limit = Mathf.Max(1f, groupRadius * 0.7f);
+            return (centre, extent <= limit ? 1f : limit / extent);
+        }
+
         private void LaunchParticipants(NavigationBudget budget, Vector2Int target)
         {
-            Vector2 groupCentre = Vector2.zero;
-            if (launchInitialOrder)
-            {
-                foreach (var entry in units) groupCentre += entry.Unit.Pose.Centre(entry.Footprint);
-                groupCentre /= units.Count;
-            }
-            Vector2 forward = ((Vector2)target + Vector2.one * 0.5f - groupCentre).normalized;
-            Vector2 across = new Vector2(-forward.y, forward.x);
+            var formation = launchInitialOrder ? Formation(target, _ => true, entry => entry.Unit.Pose) : default;
             while (launchCursor < units.Count)
             {
                 if (!budget.Take()) return;
@@ -1294,11 +1365,7 @@ namespace GameDev.RtsRpg
                     || entry.LaunchChecked || entry.Unit.Planning || !entry.Unit.CanLaunch) continue;
                 entry.LaunchChecked = true;
                 if (launchInitialOrder)
-                {
-                    float lateral = Vector2.Dot(entry.Unit.Pose.Centre(entry.Footprint) - groupCentre, across);
-                    entry.SlotBias = across * Mathf.Clamp(lateral, -groupRadius * 0.7f, groupRadius * 0.7f);
-                    entry.Unit.ConfigureFormation(lateral / Mathf.Max(1f, groupRadius * 0.7f));
-                }
+                    entry.SlotBias = (entry.Unit.Pose.Centre(entry.Footprint) - formation.Centre) * formation.Scale;
                 if (entry.Unit.TryLaunch((Vector2)target + Vector2.one * 0.5f + entry.SlotBias))
                     entry.Unit.WatchEnemy(entry.Request?.WatchEnemy == true);
             }
@@ -1345,7 +1412,10 @@ namespace GameDev.RtsRpg
                         && entry.Unit.Pose.Equals(entry.Destination.Value)))) continue;
 
                 var unit = entry.Unit;
-                bool avoidAllies = unit.Recovering && entry.Failures % 3 != 2;
+                // Allies are soft obstacles (they flow, yield or are pushed), so
+                // recovery routes avoid only enemies. Avoiding allies made the
+                // search enclose itself in a dense army and exhaust its budget.
+                const bool avoidAllies = false;
                 bool recovery = unit.RequiresCornerRecovery || (unit.Recovering && (!needsSlot || entry.LastAttempt.HasValue));
                 var planStart = unit.PlanningPose;
                 bool startsInside = needsSlot && !recovery && acceptedArea.Contains(planStart.Cell);
