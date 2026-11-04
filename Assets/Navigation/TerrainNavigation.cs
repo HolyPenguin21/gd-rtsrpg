@@ -25,6 +25,7 @@ namespace GameDev.RtsRpg
         private readonly Dictionary<Vector2Int, List<UnitMovement>> traffic = new();
         private readonly Stack<List<UnitMovement>> spareBuckets = new();
         private readonly List<UnitMovement> units = new();
+        internal IReadOnlyList<UnitMovement> LiveUnits => units;
         private readonly Dictionary<NavigationGrid.Passage, PassageState> lanes = new();
         private readonly Stack<PassageState> freePassages = new();
         private readonly List<NavigationGrid.Passage> emptyPassages = new();
@@ -218,7 +219,7 @@ namespace GameDev.RtsRpg
         }
 
         internal UnitMovement FindContact(UnitMovement requester, Rect area,
-            bool search = false, bool avoidAllies = false, float horizon = 0f)
+            bool search = false, bool avoidAllies = false, float horizon = 0f, bool enemyOnly = false)
         {
             using var marker = ContactMarker.Auto();
             // A diagonal translating horse can retain its old anchor up to a
@@ -230,7 +231,7 @@ namespace GameDev.RtsRpg
             for (int x = min.x; x <= max.x; x++)
                 if (traffic.TryGetValue(new Vector2Int(x, z), out var bucket))
                     foreach (var unit in bucket)
-                        if (unit != requester && requester.SharesGrid(unit)
+                        if (unit != requester && requester.SharesGrid(unit) && (!enemyOnly || requester.Team != unit.Team)
                             && (UnitMovement.Overlaps(area, PredictedArea(unit, horizon))
                                 || (horizon > 0f && UnitMovement.Overlaps(area, PredictedArea(unit, horizon * 0.5f))))
                             && (!search || requester.Avoids(unit, avoidAllies))) return unit;
