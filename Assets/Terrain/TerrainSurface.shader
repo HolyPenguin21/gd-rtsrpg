@@ -63,6 +63,19 @@ Shader "GameDev/Terrain Surface"
                      + SAMPLE_TEXTURE2D(_SurfaceMap, sampler_SurfaceMap, p.xy).rgb * weights.z;
             }
 
+            float3 GroundRelief(float3 position, float3 normal, float height)
+            {
+                // Surface gradient in world space, so cliff projections need no mesh tangents.
+                float3 dpdx = ddx(position);
+                float3 dpdy = ddy(position);
+                float3 tangentX = cross(dpdy, normal);
+                float3 tangentY = cross(normal, dpdx);
+                float determinant = dot(dpdx, tangentX);
+                float3 gradient = sign(determinant) * (ddx(height) * tangentX + ddy(height) * tangentY);
+                gradient /= max(abs(determinant), 1e-8);
+                return normalize(normal - gradient / max(1.0, length(gradient) * 2.0));
+            }
+
             half4 Frag(Varyings input) : SV_Target
             {
                 half3 normal = normalize(input.normalWS);
@@ -70,7 +83,15 @@ Shader "GameDev/Terrain Surface"
                 half3 albedo;
                 if (_SurfaceType == 1)
                 {
-                    albedo = SampleRock(p, normal) * (1.0 - 0.24 * input.edgeMask.y);
+                    half3 surface = SampleRock(p, normal);
+                    // A second projection scale breaks the repeated stone silhouettes.
+                    half3 fine = SampleRock(p * 2.73 + float3(0.43, 0.19, 0.71), normal);
+                    half3 coarse = SampleRock(p * 0.37 + float3(0.13, 0.47, 0.29), normal);
+                    float fineHeight = dot(fine, float3(0.30, 0.59, 0.11));
+                    float relief = 0.19 * dot(surface, float3(0.30, 0.59, 0.11)) + 0.08 * fineHeight;
+                    normal = GroundRelief(input.positionWS, normal, relief);
+                    half3 rock = lerp(surface, coarse, 0.22) * (0.93 + 0.65 * fineHeight);
+                    albedo = rock * (1.0 - 0.24 * input.edgeMask.y);
                 }
                 else
                 {

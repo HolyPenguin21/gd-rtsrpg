@@ -295,9 +295,10 @@ namespace GameDev.RtsRpg
             float drop = (height - nextLower) * surface.HeightStepWorld * 0.25f;
             float cellSize = surface.BlockWorldSize * 0.25f;
             uint hash = DetailHash(vertex.x, vertex.y, vertex.x, vertex.y, surface.DetailSeed);
-            float width = Math.Min(cellSize * (0.075f + (hash & 255) * (0.065f / 255f)), RimReach(surface, drop));
-            float depth = Math.Min(cellSize * 0.065f, drop * 0.15f);
             bool convex = beside < height, concave = diagonal == height;
+            float cornerRadius = convex ? 0.19f : concave ? 0.15f : 0.08f;
+            float width = Math.Min(cellSize * (cornerRadius + (hash & 255) * (0.065f / 255f)), RimReach(surface, drop));
+            float depth = Math.Min(cellSize * (convex || concave ? 0.105f : 0.07f), drop * 0.15f);
             // Adjacent concave strips share the diagonal end cut in the low
             // quadrant. The nearby strip station rounds off the inside bend.
             Vector3 offset = concave ? Horizontal(outward - beyond) * (width * 1.25f)
@@ -327,14 +328,15 @@ namespace GameDev.RtsRpg
                 if (i < 4)
                 {
                     float detail = ((hash >> (i * 7)) & 127) / 127f;
-                    float width = cell * (0.045f + detail * detail * 0.19f);
+                    float shoulder = Mathf.Lerp(first.Offset.magnitude, last.Offset.magnitude, along);
+                    float width = Mathf.Lerp(cell * (0.04f + detail * detail * 0.22f), shoulder, 0.35f);
                     width = Math.Min(width, RimReach(surface, gap));
                     // Keep the first/last stations next to an inside corner
                     // far enough back that the strips meet only at their end cut.
                     if ((i == 1 && first.Concave) || (i == 3 && last.Concave))
                         width = Math.Min(width, cell * 0.085f);
                     float depth = Mathf.Lerp(first.Depth, last.Depth, along);
-                    float skirt = Math.Max(depth, Math.Min(cell * 0.055f, gap * 0.15f));
+                    float skirt = Math.Max(depth, Math.Min(cell * (0.045f + detail * 0.085f), gap * 0.15f));
                     section = new RimCorner(outward * width, depth, skirt, false, false);
                 }
                 Strip(previous, top, previousSection, section, outward);
@@ -354,9 +356,12 @@ namespace GameDev.RtsRpg
             {
                 float width = section.Offset.magnitude;
                 var from = section;
-                for (int i = 1; i <= 3; i++)
+                const int segments = 6;
+                for (int i = 1; i <= segments; i++)
                 {
-                    Vector3 normal = (outward * (3 - i) + direction * i).normalized;
+                    float angle = i * (Mathf.PI * 0.5f / segments);
+                    Vector3 normal = i == segments ? direction
+                        : outward * Mathf.Cos(angle) + direction * Mathf.Sin(angle);
                     var to = new RimCorner(normal * width, section.Depth, section.SkirtDepth, false, false);
                     Strip(corner, corner, from, to, (from.Offset + to.Offset).normalized);
                     from = to;
