@@ -23,8 +23,9 @@ namespace GameDev.RtsRpg
         private float cellSize, height, exitSpeed;
         private Quaternion terrainYaw;
         private int next, edgeIndex, pendingIndex, revision, detourSide;
-        private bool activeEdge, retreating, provisional, pendingProvisional, localStep, finishingMountedStep, endProvisionalAfterEdge;
-        private bool revisionHold, revisionRecovery;
+        private bool activeEdge, retreating, provisional, pendingProvisional, localStep, finishingMountedStep, stopAfterEdge;
+        private bool revisionHold, revisionRecovery, watchEnemy;
+        private UnitMovement enemyContact;
         private NavigationGrid.Passage passage, previousPassage;
         private Vector2Int passageMouth;
         private Vector2 steeringPoint;
@@ -58,6 +59,8 @@ namespace GameDev.RtsRpg
         internal Vector2 PredictionVelocity { get; private set; }
         internal bool Planning { get; set; }
         internal int Team { get; private set; }
+        internal UnitMovement EnemyContact => enemyContact != null && enemyContact.isActiveAndEnabled
+            && enemyContact.Team != Team && SharesGrid(enemyContact) ? enemyContact : null;
         internal NavigationGrid.Passage Passage => passage;
         internal Vector2Int PassageMouth => passageMouth;
         internal int PassageDirection => passageDirection;
@@ -158,7 +161,7 @@ namespace GameDev.RtsRpg
             next = index;
             wait = 0f;
             provisional = preview;
-            endProvisionalAfterEdge = false;
+            stopAfterEdge = false;
             Status = route.Status;
             State = Motion.Moving;
         }
@@ -180,11 +183,25 @@ namespace GameDev.RtsRpg
         internal void EndProvisionalRoute()
         {
             if (!provisional) return;
-            if (activeEdge && progress > 0f) endProvisionalAfterEdge = true;
+            if (activeEdge && progress > 0f) stopAfterEdge = true;
             else StopAtAnchor();
         }
 
         internal void CancelPending() => pending = null;
+
+        internal void WatchEnemy(bool watch)
+        {
+            watchEnemy = watch;
+            if (!watch) enemyContact = null;
+        }
+
+        internal void StopAfterCurrentEdge()
+        {
+            CancelPending();
+            if (IsRecoveringRevision) return;
+            if (activeEdge && progress > 0f) stopAfterEdge = true;
+            else StopAtAnchor();
+        }
 
         internal void ReportFailure(NavigationStatus status)
         {
@@ -196,6 +213,7 @@ namespace GameDev.RtsRpg
 
         private void OnDisable()
         {
+            WatchEnemy(false);
             if (navigation != null) navigation.Untrack(this);
             navigation = null;
             grid = null;
@@ -253,7 +271,7 @@ namespace GameDev.RtsRpg
                 }
                 else StopAtAnchor();
             }
-            if (!activeEdge && path != null && next < path.Points.Count)
+            if (!activeEdge && EnemyContact == null && path != null && next < path.Points.Count)
                 SelectEdge();
             else if (activeEdge && progress == 0f && HoldReason == Hold.Traffic && path != null && Time.fixedTime >= nextDetour)
             {
@@ -488,6 +506,28 @@ namespace GameDev.RtsRpg
             }
 
             Vector2 end = Centre(edgeEnd);
+            if (watchEnemy && !retreating && !revisionRecovery)
+            {
+                // Contact is confined to the next short, physically relevant
+                // sweep. Search expansions and distant units cannot trigger it.
+                Rect probe = edgeAngle == 0f
+                    ? TranslationSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), facing)
+                    : TurnSlice(progress, Mathf.Min(1f, progress + 0.2f));
+                bool clear = edgeAngle == 0f
+                    ? grid.CanSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), HalfExtent(facing))
+                    : CanSweepTurn(progress, Mathf.Min(1f, progress + 0.2f));
+                if (clear)
+                {
+                    var enemy = navigation.FindContact(this, probe, enemyOnly: true);
+                    if (enemy != null)
+                    {
+                        enemyContact = enemy;
+                        CancelPending();
+                        RecoverBlockedEdge();
+                        return;
+                    }
+                }
+            }
             if (!retreating && (passagePending || (passage != null && !navigation.CanEnterPassage(this))))
             {
                 Wait(Hold.Passage, dt);
@@ -604,10 +644,10 @@ namespace GameDev.RtsRpg
 
         private void RecoverBlockedEdge()
         {
-            if (HoldReason == Hold.Geometry) RecordCornerFailure(edgeEnd);
+            if (EnemyContact == null && HoldReason == Hold.Geometry) RecordCornerFailure(edgeEnd);
             if (progress == 0f)
             {
-                if (HoldReason == Hold.Geometry && TryDetour(edgeEnd, true)) return;
+                if (EnemyContact == null && HoldReason == Hold.Geometry && TryDetour(edgeEnd, true)) return;
                 StopAtAnchor();
             }
             else
@@ -845,17 +885,18 @@ namespace GameDev.RtsRpg
                 return;
             }
             next = localStep ? edgeIndex : edgeIndex + 1;
-            if (endProvisionalAfterEdge) StopAtAnchor();
+            if (stopAfterEdge) StopAtAnchor();
             if (!localStep) detourSide = 0;
             if (path != null && !path.IsCurrent) StopAtAnchor();
         }
 
         private void StopAtAnchor()
         {
-            activeEdge = retreating = finishingMountedStep = endProvisionalAfterEdge = leaveCornerAfterEdge = false;
+            activeEdge = retreating = finishingMountedStep = stopAfterEdge = leaveCornerAfterEdge = false;
             revisionHold = revisionRecovery = false;
             progress = speed = wait = 0f;
             path = null;
+            provisional = false;
             yieldTarget = mountedStep = null;
             State = Motion.RepathPending;
         }
@@ -949,7 +990,7 @@ namespace GameDev.RtsRpg
         internal bool SharesGrid(UnitMovement other) => grid == other.grid;
         internal bool Avoids(UnitMovement other, bool avoidAllies) =>
             other.Team != Team || (avoidAllies && (other.Recovering || !other.HasRoute));
-        private bool CurrentGrid => navigation != null && grid == navigation.Grid && grid.IsAlive;
+        internal bool CurrentGrid => navigation != null && grid == navigation.Grid && grid.IsAlive;
         private Vector2 Centre(NavigationPose pose) => pose.Centre(Footprint);
         private Vector2 TurnHalfExtent => Vector2.one * 1.118034f;
         private UnitMovement Blocker(Rect sweep) => navigation.FindContact(this, sweep);

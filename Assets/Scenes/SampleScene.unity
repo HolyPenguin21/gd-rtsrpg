@@ -313,6 +313,7 @@ GameObject:
   - component: {fileID: 1003004}
   - component: {fileID: 1003005}
   - component: {fileID: 1003006}
+  - component: {fileID: 1003007}
   m_Layer: 0
   m_Name: Terrain (explicit or seeded)
   m_TagString: Untagged
@@ -816,6 +817,21 @@ MonoBehaviour:
     y: 4
     width: 4
     height: 4
+--- !u!114 &1003007
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1003000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 237eeb7ea5f44fbd96cba82c182974c9, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  terrainCamera: {fileID: 330585548}
+  inputActions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
+  indicatorMaterial: {fileID: 2100000, guid: 323d96cbe4544dd39cadb42d7cd06e5f, type: 2}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

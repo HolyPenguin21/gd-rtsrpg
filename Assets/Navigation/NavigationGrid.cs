@@ -104,10 +104,15 @@ namespace GameDev.RtsRpg
 
         // Traverse only cells crossed by the ray, in front-to-back order. The same
         // planar corner heights define both the mesh top and WorldPoint.
-        internal bool TryPickSurface(Ray ray, out Vector2Int cell)
+        internal bool TryPickSurface(Ray ray, out Vector2Int cell) => TryPickSurface(ray, out cell, out _, out _);
+
+        // A cliff occludes a selection ray but is not a valid order target.
+        internal bool TryPickSurface(Ray ray, out Vector2Int cell, out Vector3 point, out float occlusion)
         {
             using var marker = PickMarker.Auto();
             cell = default;
+            point = default;
+            occlusion = float.PositiveInfinity;
             if (!IsAlive) return false;
             float scale = 4f / Surface.BlockWorldSize;
             Vector3 origin = worldToLocal.MultiplyPoint3x4(ray.origin);
@@ -138,11 +143,17 @@ namespace GameDev.RtsRpg
                     if (hit >= enter - 0.0001f && hit <= leave + 0.0001f)
                     {
                         cell = new Vector2Int(x, z);
+                        occlusion = Mathf.Max(0f, hit);
+                        point = ray.GetPoint(occlusion);
                         return true;
                     }
                     // A near-side cliff hides the lower surface behind it. Reject the
                     // cliff face instead of picking unrelated ground through the rock.
-                    if (hit < enter - 0.0001f) return false;
+                    if (hit < enter - 0.0001f)
+                    {
+                        occlusion = enter;
+                        return false;
+                    }
                 }
                 if (leave >= exit) break;
                 if (tx <= tz) x += stepX;
@@ -159,6 +170,17 @@ namespace GameDev.RtsRpg
             enter = Mathf.Max(enter, Mathf.Min(a, b));
             exit = Mathf.Min(exit, Mathf.Max(a, b));
             return enter <= exit;
+        }
+
+        internal Vector3 SurfaceNormal(Vector3 world)
+        {
+            if (!TryWorldToCell(world, out var cell)) return Vector3.up;
+            var top = Surface.GetCell(cell.x, cell.y);
+            float span = Surface.BlockWorldSize * 0.25f;
+            float step = Surface.HeightStepWorld * 0.25f;
+            var east = LocalToWorld.MultiplyVector(new Vector3(span, (top.Corner(1, 0) - top.Corner(0, 0)) * step, 0f));
+            var north = LocalToWorld.MultiplyVector(new Vector3(0f, (top.Corner(0, 1) - top.Corner(0, 0)) * step, span));
+            return Vector3.Cross(north, east).normalized;
         }
 
         public Vector3 WorldPoint(float cellX, float cellZ)

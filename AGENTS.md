@@ -12,7 +12,7 @@ Read this file before changing any source or Unity scene. This repository is a U
 
 Before implementing anything, inspect the current repository and the real affected code. Never assume a future module already exists because it appears in the roadmap.
 
-## Current baseline (Stage 05.1 merged; Stage 05.2 pending review)
+## Current baseline (Stage 05.3 merged, Stage 06 submitted for review)
 
 - Unity **6000.5.4f1**, URP **17.5.0**.
 - The only scene is `Assets/Scenes/SampleScene.unity`.
@@ -41,4 +41,6 @@ Provide: changed systems and files; why those changes are within scope; dependen
 
 ## Scope reminder
 
-Stage 05.1 is merged in PR #13. Current Issue #14 covers pathfinding and Follow Mouse performance, cliff contours and mounted 1×2 facing. Stage 06 starts after Stage 05.2 acceptance. See Docs/Stage05Movement.md for boundaries and manual checks. RTS selection/orders, combat, RPG, world map and test infrastructure remain outside this stage.
+Stage 05.2 was merged in PR #15. Stage 05.3 group movement and same-grid revision recovery were merged in PRs #16 and #18. See Docs/Stage05Movement.md for movement scenarios.
+
+Issue #19 adds RTS selection and orders in SampleScene. Controls use the existing terrain picker and budgeted NavigationDemo dispatcher. UnitMovement continues to own movement and reports a local enemy contact for the Attack-Move intent. See Docs/Stage06Controls.md for controls and acceptance. Combat resolution, RPG, world map and test infrastructure are outside Stage 06.
