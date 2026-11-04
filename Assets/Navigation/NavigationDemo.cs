@@ -42,6 +42,9 @@ namespace GameDev.RtsRpg
             public int Failures, LastTrafficRevision, NextCandidate;
             public float RetryAt, StartDelay = -1f;
             public int MotionAtOrder, TurnsAtOrder, StopsAtOrder;
+            // Stage 06.1 diagnostics baselines; the unit counters are monotonic.
+            public float OrderAt = -1f;
+            public int FlipsAtOrder, RejectsAtOrder, CornersAtOrder, Plans;
             public Vector2 SlotBias;
             public NavigationPath SlotRoute;
             public bool Reserved, Assigned, LaunchChecked;
@@ -63,7 +66,7 @@ namespace GameDev.RtsRpg
 
         internal struct GroupRouteProgress
         {
-            internal int Active, Accepted, Planning, Moving, Arrived, Blocked, NoPath, Stale, EngagementPending, BudgetExceeded;
+            internal int Active, Accepted, Planning, Moving, Arrived, Blocked, EnemyBlocked, NoPath, Stale, EngagementPending, BudgetExceeded;
         }
 
         private sealed class ParticipantPlan
@@ -111,8 +114,8 @@ namespace GameDev.RtsRpg
         private ParticipantPlan participantPlan;
         private int guideExpanded, nextHoverGuideFrame;
         private float nextFollow;
-        private int planIndex, targetExpanded, frameExpanded, launchCursor;
-        private float acceptedAt, orderAt, guideStartedAt;
+        private int planIndex, targetExpanded, frameExpanded, launchCursor, lateLaunchCursor;
+        private float acceptedAt, guideStartedAt;
         private bool guideLocal;
         private readonly List<float> startDelays = new();
         private readonly float[] frameTimes = new float[300], sortedFrameTimes = new float[300];
@@ -121,7 +124,10 @@ namespace GameDev.RtsRpg
         private double lastPlanningMs, sumPlanningMs, peakPlanningMs;
         private long lastPlanningBytes, sumPlanningBytes, peakPlanningBytes;
         private int planningFrames, assignments, sharedAssignments, fullSearches;
-        private string trafficReport, planningReport, requestReport;
+        private string trafficReport, planningReport, requestReport, qualityReport;
+        [SerializeField] private bool qualityDiagnostics;
+        private int admissionSample, gcSample;
+        private float admissionSampleAt;
         private float nextReport, nextRequestReport;
         private string targetReport;
         private Rect Panel => new Rect(12, 12, 420, Math.Min(Screen.height - 24, 560));
@@ -196,9 +202,30 @@ namespace GameDev.RtsRpg
                 entry.Failures = entry.NextCandidate = 0;
                 unit.CancelPending();
                 unit.WatchEnemy(false);
+                // A unit already heading roughly toward the new target keeps
+                // its momentum until the new route joins. One travelling away
+                // finishes its current checked edge and stops there, so the new
+                // order never shows a long continuation in the old direction.
+                Vector2 toTarget = (Vector2)request.Target + Vector2.one * 0.5f - unit.Position;
+                if (unit.HasRoute && Vector2.Dot(unit.TravelVelocity, toTarget) < 0f) unit.StopAfterCurrentEdge();
+                MarkOrderBaseline(entry, Time.time);
             }
             SwitchDispatch(request);
             return true;
+        }
+
+        private static void MarkOrderBaseline(Participant entry, float at)
+        {
+            var unit = entry.Unit;
+            entry.OrderAt = at;
+            entry.StartDelay = -1f;
+            entry.MotionAtOrder = unit.MotionTicks;
+            entry.TurnsAtOrder = unit.TurnCount;
+            entry.StopsAtOrder = unit.StopCount;
+            entry.FlipsAtOrder = unit.SideFlips;
+            entry.RejectsAtOrder = unit.ClearanceRejects;
+            entry.CornersAtOrder = unit.CornerRetries;
+            entry.Plans = 0;
         }
 
         private void ClearDestination(Participant entry)
@@ -287,14 +314,19 @@ namespace GameDev.RtsRpg
                 else if (result == NavigationStatus.BudgetExceeded) progress.BudgetExceeded++;
                 else if (result is NavigationStatus.NoPath or NavigationStatus.InvalidStart or NavigationStatus.InvalidGoal)
                 {
-                    if (unit.HoldReason == UnitMovement.Hold.Traffic) progress.Blocked++;
+                    if (unit.HoldReason == UnitMovement.Hold.Enemy) progress.EnemyBlocked++;
+                    else if (unit.HoldReason == UnitMovement.Hold.Traffic) progress.Blocked++;
                     else progress.NoPath++;
                 }
                 else if (result == NavigationStatus.Stale) progress.Stale++;
                 else if (entry.Assigned && entry.Destination.HasValue && unit.State == UnitMovement.Motion.Arrived
                     && unit.Pose.Equals(entry.Destination.Value)) progress.Arrived++;
                 else if (result != null && (unit.State == UnitMovement.Motion.Waiting
-                    || unit.State == UnitMovement.Motion.Blocked)) progress.Blocked++;
+                    || unit.State == UnitMovement.Motion.Blocked))
+                {
+                    if (unit.HoldReason == UnitMovement.Hold.Enemy) progress.EnemyBlocked++;
+                    else progress.Blocked++;
+                }
                 else if (entry.Assigned && unit.HasRoute) progress.Moving++;
                 else progress.Planning++;
             }
@@ -429,7 +461,7 @@ namespace GameDev.RtsRpg
             followMouse = false;
             nextFollow = 0;
             planIndex = targetExpanded = frameExpanded = nextHoverGuideFrame = launchCursor = 0;
-            acceptedAt = orderAt = 0f;
+            acceptedAt = 0f;
             frameTimeCursor = frameTimeCount = 0;
             totalExpanded = 0;
             lastPlanningMs = sumPlanningMs = peakPlanningMs = 0;
@@ -719,7 +751,7 @@ namespace GameDev.RtsRpg
             }
             requestedTarget = goal;
             launchInitialOrder = true;
-            orderAt = Time.time;
+            foreach (var entry in units) MarkOrderBaseline(entry, Time.time);
             report = $"Army spawned: {units.Count}/{count}. Enable Follow Mouse to steer.";
         }
 
@@ -927,6 +959,7 @@ namespace GameDev.RtsRpg
             }
             if (units.Count == 0) { ClearUnits(); return; }
             planIndex %= units.Count;
+            AdoptSettledDestinations();
 
             float now = Time.time;
             frameTimes[frameTimeCursor] = Time.unscaledDeltaTime * 1000f;
@@ -946,6 +979,7 @@ namespace GameDev.RtsRpg
                 if (manualDispatch) ResumeDispatch(now);
                 AdvanceGuide(frameWork);
                 if (acceptedTarget.HasValue) LaunchParticipants(frameWork, acceptedTarget.Value);
+                if (acceptedTarget.HasValue && launchCursor >= units.Count) LaunchLate(frameWork, acceptedTarget.Value);
                 while (frameWork.CanContinue && requests > 0 && launchCursor >= (targetArea == null ? 0 : units.Count))
                 {
                     if (participantPlans.Count < ConcurrentPlans && StartParticipantPlan(now))
@@ -963,10 +997,18 @@ namespace GameDev.RtsRpg
                     participantPlan = null;
                 }
             }
-            if (armyDemo && (acceptedTarget.HasValue || launchInitialOrder))
+            // Start latency: from this unit's own order to its first motion with
+            // positive progress toward its own target. A unit that keeps moving
+            // the old way does not count as started.
+            if (armyDemo || manualDispatch)
                 foreach (var entry in units)
-                    if (entry.StartDelay < 0f && entry.Unit.MotionTicks > entry.MotionAtOrder)
-                        entry.StartDelay = now - orderAt;
+                {
+                    if (entry.OrderAt < 0f || entry.StartDelay >= 0f || entry.Unit.MotionTicks <= entry.MotionAtOrder) continue;
+                    Vector2Int? target = manualDispatch ? entry.Request?.Target : acceptedTarget ?? goal;
+                    if (!target.HasValue) continue;
+                    Vector2 toTarget = (Vector2)target.Value + Vector2.one * 0.5f - entry.Unit.Position;
+                    if (Vector2.Dot(entry.Unit.TravelVelocity, toTarget) > 0f) entry.StartDelay = now - entry.OrderAt;
+                }
             frameExpanded = frameBudget - frameWork.Remaining;
             totalExpanded += frameExpanded;
             targetExpanded += frameExpanded;
@@ -981,6 +1023,59 @@ namespace GameDev.RtsRpg
             {
                 nextReport = Time.unscaledTime + 0.25f;
                 UpdateTrafficReport();
+            }
+        }
+
+        // Arrival by contact: a unit that settled near its slot keeps its
+        // actual pose as the destination when that footprint is not reserved
+        // by anyone else; otherwise it keeps the original slot and is routed
+        // there again by the normal dispatcher.
+        private void AdoptSettledDestinations()
+        {
+            foreach (var entry in units)
+            {
+                var unit = entry.Unit;
+                if (!unit.Settled || unit.State != UnitMovement.Motion.Arrived || !entry.Destination.HasValue
+                    || unit.Pose.Equals(entry.Destination.Value)) continue;
+                var own = entry.Reserved ? entry.Destination : null;
+                if (!NavigationGroupPlanner.CanReserve(unit.Pose, entry.Footprint, reservations, own))
+                {
+                    // Slot exchange before the final jam: a slot this unit now
+                    // physically covers is released from an owner that has not
+                    // reached it; that owner is assigned a new slot. A slot whose
+                    // owner stands on it is never taken.
+                    var area = new RectInt(unit.Pose.Cell, entry.Footprint.Size(unit.Pose.Facing));
+                    bool held = false;
+                    foreach (var other in units)
+                    {
+                        if (other == entry || !other.Reserved || !other.Destination.HasValue) continue;
+                        var slot = other.Destination.Value;
+                        if (!area.Overlaps(new RectInt(slot.Cell, other.Footprint.Size(slot.Facing)))) continue;
+                        if (other.Unit != null && other.Unit.State == UnitMovement.Motion.Arrived && other.Unit.Pose.Equals(slot))
+                        {
+                            held = true;
+                            break;
+                        }
+                    }
+                    if (held) continue;
+                    foreach (var other in units)
+                    {
+                        if (other == entry || !other.Reserved || !other.Destination.HasValue) continue;
+                        var slot = other.Destination.Value;
+                        if (!area.Overlaps(new RectInt(slot.Cell, other.Footprint.Size(slot.Facing)))) continue;
+                        ClearDestination(other);
+                        other.LastAttempt = null;
+                        other.RetryAt = 0f;
+                        other.Failures = other.NextCandidate = 0;
+                        other.Unit.StopAfterCurrentEdge();
+                    }
+                    if (!NavigationGroupPlanner.CanReserve(unit.Pose, entry.Footprint, reservations, own)) continue;
+                }
+                if (entry.Reserved) NavigationGroupPlanner.Reserve(entry.Destination.Value, entry.Footprint, reservations, false);
+                entry.Destination = unit.Pose;
+                NavigationGroupPlanner.Reserve(unit.Pose, entry.Footprint, reservations);
+                entry.Reserved = true;
+                entry.SlotRoute = null;
             }
         }
 
@@ -1179,7 +1274,6 @@ namespace GameDev.RtsRpg
             acceptedTarget = target;
             if (!manualDispatch) goal = target;
             acceptedAt = Time.time;
-            if (!hadInitialLaunch) orderAt = guideStartedAt;
             lastRejectedTarget = null;
             targetReport = local ? "Destination adjusted" : "Accepted";
             launchInitialOrder = false;
@@ -1194,19 +1288,11 @@ namespace GameDev.RtsRpg
             acceptedArea = area;
             targetArea = area.Cells;
             launchCursor = 0;
-            Vector2 groupCentre = Vector2.zero;
-            int count = 0;
-            foreach (var entry in units)
-                if (InDispatch(entry)) { groupCentre += entry.Unit.PlanningPose.Centre(entry.Footprint); count++; }
-            groupCentre /= Mathf.Max(1, count);
-            Vector2 forward = ((Vector2)target + Vector2.one * 0.5f - groupCentre).normalized;
-            Vector2 across = new Vector2(-forward.y, forward.x);
+            var formation = Formation(target, entry => InDispatch(entry), entry => entry.Unit.PlanningPose);
             foreach (var entry in units)
             {
                 if (manualDispatch && !NeedsManualDestination(entry)) continue;
-                float lateral = Vector2.Dot(entry.Unit.PlanningPose.Centre(entry.Footprint) - groupCentre, across);
-                entry.SlotBias = across * Mathf.Clamp(lateral, -groupRadius * 0.7f, groupRadius * 0.7f);
-                entry.Unit.ConfigureFormation(lateral / Mathf.Max(1f, groupRadius * 0.7f));
+                entry.SlotBias = (entry.Unit.PlanningPose.Centre(entry.Footprint) - formation.Centre) * formation.Scale;
                 bool keep = false;
                 if (local && previous.HasValue && entry.Reserved && entry.Destination.HasValue)
                 {
@@ -1225,28 +1311,51 @@ namespace GameDev.RtsRpg
                     entry.RetryAt = 0;
                     entry.LastAttempt = keep ? NavigationStatus.Success : null;
                 }
-                entry.LaunchChecked = keep || entry.Unit.HasRoute || (hadInitialLaunch && entry.LaunchChecked);
-                if (!hadInitialLaunch)
-                {
-                    entry.MotionAtOrder = entry.Unit.MotionTicks;
-                    entry.TurnsAtOrder = entry.Unit.TurnCount;
-                    entry.StopsAtOrder = entry.Unit.StopCount;
-                    entry.StartDelay = -1f;
-                }
+                // A route that will stop after its current edge (an order
+                // reversal) still needs a safe launch toward the new target.
+                entry.LaunchChecked = keep || (entry.Unit.HasRoute && !entry.Unit.StopsAfterEdge)
+                    || (hadInitialLaunch && entry.LaunchChecked);
+                // Manual orders record their baseline at the click in QueueOrder.
+                if (!hadInitialLaunch && !manualDispatch) MarkOrderBaseline(entry, guideStartedAt);
             }
             targetExpanded = 0;
         }
 
+        // Formation-preserving destinations (SC2-like): when the target lies
+        // outside the group's bounds, every unit keeps its full 2D offset from
+        // the group centre, scaled down uniformly to fit the target area.
+        // Paths stay parallel instead of crossing inside the crowd. A target
+        // inside the group contracts the units toward it, keeping their bearing.
+        private (Vector2 Centre, float Scale) Formation(Vector2Int target, Predicate<Participant> member,
+            Func<Participant, NavigationPose> pose)
+        {
+            Vector2 centre = Vector2.zero, min = Vector2.positiveInfinity, max = Vector2.negativeInfinity;
+            int count = 0;
+            foreach (var entry in units)
+            {
+                if (!member(entry)) continue;
+                Vector2 at = pose(entry).Centre(entry.Footprint);
+                centre += at;
+                min = Vector2.Min(min, at);
+                max = Vector2.Max(max, at);
+                count++;
+            }
+            if (count == 0) return (Vector2.zero, 0f);
+            centre /= count;
+            Vector2 goal = (Vector2)target + Vector2.one * 0.5f;
+            // Target inside the group: contract toward it. Each unit keeps its
+            // bearing from the target, so slots lie on the side it comes from.
+            if (goal.x >= min.x && goal.x <= max.x && goal.y >= min.y && goal.y <= max.y) centre = goal;
+            float extent = 0f;
+            foreach (var entry in units)
+                if (member(entry)) extent = Mathf.Max(extent, (pose(entry).Centre(entry.Footprint) - centre).magnitude);
+            float limit = Mathf.Max(1f, groupRadius * 0.7f);
+            return (centre, extent <= limit ? 1f : limit / extent);
+        }
+
         private void LaunchParticipants(NavigationBudget budget, Vector2Int target)
         {
-            Vector2 groupCentre = Vector2.zero;
-            if (launchInitialOrder)
-            {
-                foreach (var entry in units) groupCentre += entry.Unit.Pose.Centre(entry.Footprint);
-                groupCentre /= units.Count;
-            }
-            Vector2 forward = ((Vector2)target + Vector2.one * 0.5f - groupCentre).normalized;
-            Vector2 across = new Vector2(-forward.y, forward.x);
+            var formation = launchInitialOrder ? Formation(target, _ => true, entry => entry.Unit.Pose) : default;
             while (launchCursor < units.Count)
             {
                 if (!budget.Take()) return;
@@ -1256,11 +1365,27 @@ namespace GameDev.RtsRpg
                     || entry.LaunchChecked || entry.Unit.Planning || !entry.Unit.CanLaunch) continue;
                 entry.LaunchChecked = true;
                 if (launchInitialOrder)
-                {
-                    float lateral = Vector2.Dot(entry.Unit.Pose.Centre(entry.Footprint) - groupCentre, across);
-                    entry.SlotBias = across * Mathf.Clamp(lateral, -groupRadius * 0.7f, groupRadius * 0.7f);
-                    entry.Unit.ConfigureFormation(lateral / Mathf.Max(1f, groupRadius * 0.7f));
-                }
+                    entry.SlotBias = (entry.Unit.Pose.Centre(entry.Footprint) - formation.Centre) * formation.Scale;
+                if (entry.Unit.TryLaunch((Vector2)target + Vector2.one * 0.5f + entry.SlotBias))
+                    entry.Unit.WatchEnemy(entry.Request?.WatchEnemy == true);
+            }
+        }
+
+        // The one-pass launcher above runs once per accepted target. Units that
+        // were still finishing an edge (or stopping after an order reversal)
+        // become launchable later; give them the same checked short segment
+        // instead of leaving them idle until their individual plan arrives.
+        private void LaunchLate(NavigationBudget budget, Vector2Int target)
+        {
+            if (targetArea == null || (manualDispatch && (dispatchRequest == null || dispatchRequest.Exact))) return;
+            for (int scanned = 0; scanned < 16 && scanned < units.Count; scanned++)
+            {
+                if (!budget.Take()) return;
+                lateLaunchCursor = (lateLaunchCursor + 1) % units.Count;
+                var entry = units[lateLaunchCursor];
+                if (!NeedsSlot(entry) || entry.LaunchChecked || entry.Unit.Planning || !entry.Unit.CanLaunch
+                    || entry.Unit.EnemyContact != null) continue;
+                entry.LaunchChecked = true;
                 if (entry.Unit.TryLaunch((Vector2)target + Vector2.one * 0.5f + entry.SlotBias))
                     entry.Unit.WatchEnemy(entry.Request?.WatchEnemy == true);
             }
@@ -1287,7 +1412,10 @@ namespace GameDev.RtsRpg
                         && entry.Unit.Pose.Equals(entry.Destination.Value)))) continue;
 
                 var unit = entry.Unit;
-                bool avoidAllies = unit.Recovering && entry.Failures % 3 != 2;
+                // Allies are soft obstacles (they flow, yield or are pushed), so
+                // recovery routes avoid only enemies. Avoiding allies made the
+                // search enclose itself in a dense army and exhaust its budget.
+                const bool avoidAllies = false;
                 bool recovery = unit.RequiresCornerRecovery || (unit.Recovering && (!needsSlot || entry.LastAttempt.HasValue));
                 var planStart = unit.PlanningPose;
                 bool startsInside = needsSlot && !recovery && acceptedArea.Contains(planStart.Cell);
@@ -1320,6 +1448,7 @@ namespace GameDev.RtsRpg
                     participantPlan.ReuseScan = reuseIndex;
                 }
                 unit.Planning = true;
+                entry.Plans++;
                 return true;
             }
             return false;
@@ -1672,7 +1801,7 @@ namespace GameDev.RtsRpg
         private void UpdateTrafficReport()
         {
             int routes = 0, waiting = 0, blocked = 0, arrived = 0, capped = 0, noPath = 0, accepted = 0, attempted = 0;
-            int planning = 0, geometry = 0, traffic = 0, passage = 0, turns = 0, stops = 0;
+            int planning = 0, geometry = 0, traffic = 0, passage = 0, enemy = 0, turns = 0, stops = 0;
             startDelays.Clear();
             foreach (var entry in units)
             {
@@ -1688,6 +1817,7 @@ namespace GameDev.RtsRpg
                     case UnitMovement.Hold.Geometry: geometry++; break;
                     case UnitMovement.Hold.Traffic: traffic++; break;
                     case UnitMovement.Hold.Passage: passage++; break;
+                    case UnitMovement.Hold.Enemy: enemy++; break;
                 }
                 if (entry.Destination.HasValue && unit.State == UnitMovement.Motion.Arrived
                     && unit.Pose.Equals(entry.Destination.Value)) arrived++;
@@ -1713,12 +1843,57 @@ namespace GameDev.RtsRpg
                 + (armyDemo ? $"Target {target} · {targetReport} · queued {hoverTarget}\nDispatch {attempted}/{units.Count} · assigned {accepted} · " : "")
                 + $"NoPath/invalid {noPath} · BudgetExceeded {capped} · active {(GuideActive ? 1 : 0) + participantPlans.Count}"
                 + (GuideActive ? $" · guide expansions {guideExpanded}" : "")
-                + $"\nHolds: plan {planning} · terrain {geometry} · units {traffic} · lane {passage} · turns {turns} · stops {stops}"
+                + $"\nHolds: plan {planning} · terrain {geometry} · units {traffic} · enemy {enemy} · lane {passage} · turns {turns} · stops {stops}"
                 + (armyDemo ? $"\nStarted {startDelays.Count}/{units.Count} · 90% start {startTime}" : "");
+            qualityReport = qualityDiagnostics ? BuildQualityReport(enemy) : null;
             planningReport = $"Planning ms last/mean/max {lastPlanningMs:F2}/{sumPlanningMs / planningFrames:F2}/{peakPlanningMs:F2} · "
                 + $"B {lastPlanningBytes}/{sumPlanningBytes / planningFrames}/{peakPlanningBytes}\n"
                 + $"Expansions {frameExpanded}/{targetExpanded}/{totalExpanded} · assignments {assignments} (shared {sharedAssignments}) · A* {fullSearches}\n"
                 + $"Frame p95 {frameP95:F1} ms · last {frameTimeCount} frames";
+        }
+
+        // Stage 06.1 development counters. Built only while enabled, at the
+        // report cadence; nothing is written to the Console.
+        private string BuildQualityReport(int enemyHolds)
+        {
+            int flips = 0, maxFlips = 0, rejects = 0, corners = 0, plans = 0, maxPlans = 0, waited = 0, live = 0;
+            float waitTotal = 0f, waitMax = 0f;
+            startDelays.Clear();
+            foreach (var entry in units)
+            {
+                var unit = entry.Unit;
+                if (unit == null || !unit.isActiveAndEnabled) continue;
+                live++;
+                int unitFlips = unit.SideFlips - entry.FlipsAtOrder;
+                flips += unitFlips;
+                maxFlips = Math.Max(maxFlips, unitFlips);
+                rejects += unit.ClearanceRejects - entry.RejectsAtOrder;
+                corners += unit.CornerRetries - entry.CornersAtOrder;
+                plans += entry.Plans;
+                maxPlans = Math.Max(maxPlans, entry.Plans);
+                if (unit.PassageWaitTotal > 0f) { waited++; waitTotal += unit.PassageWaitTotal; }
+                waitMax = Mathf.Max(waitMax, unit.PassageWaitMax);
+                if (entry.StartDelay >= 0f) startDelays.Add(entry.StartDelay);
+            }
+            startDelays.Sort();
+            float now = Time.time;
+            int admissions = navigation.PassageAdmissions;
+            float rate = now > admissionSampleAt ? (admissions - admissionSample) / (now - admissionSampleAt) : 0f;
+            admissionSample = admissions;
+            admissionSampleAt = now;
+            int collections = GC.CollectionCount(0);
+            int gcDelta = collections - gcSample;
+            gcSample = collections;
+            return $"Start p50/p90/p99 {Percentile(0.5f)}/{Percentile(0.9f)}/{Percentile(0.99f)} · started {startDelays.Count}/{live}\n"
+                + $"Side flips {flips} (max/unit {maxFlips}) · commit rejects {rejects} · corner retries {corners} · enemy holds {enemyHolds}\n"
+                + $"Plans {plans} (max/unit {maxPlans}) · passage wait mean/max {(waited == 0 ? 0f : waitTotal / waited):F2}/{waitMax:F2}s · admitted {rate:F1}/s\n"
+                + $"Gen0 GC since last report {gcDelta}";
+
+            string Percentile(float fraction)
+            {
+                int needed = Mathf.Max(1, Mathf.CeilToInt(live * fraction));
+                return startDelays.Count >= needed ? $"{startDelays[needed - 1]:F2}s" : "pending";
+            }
         }
 
         private void OnGUI()
@@ -1727,7 +1902,7 @@ namespace GameDev.RtsRpg
             using var marker = GuiMarker.Auto();
             GUILayout.BeginArea(Panel, GUI.skin.box);
             scroll = GUILayout.BeginScrollView(scroll);
-            GUILayout.Label("Stage 05.3 — Terrain and group traffic");
+            GUILayout.Label("Stage 06.1 — Terrain and group traffic");
             GUILayout.Label(builder.BuildReport ?? "Terrain unavailable.");
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Basin")) Landmark(0);
@@ -1785,6 +1960,9 @@ namespace GameDev.RtsRpg
                 }
                 GUILayout.Label(trafficReport ?? "Waiting for planning.");
                 GUILayout.Label(planningReport ?? "");
+                bool quality = GUILayout.Toggle(qualityDiagnostics, "Movement quality counters");
+                if (quality != qualityDiagnostics) { qualityDiagnostics = quality; qualityReport = null; }
+                if (qualityDiagnostics) GUILayout.Label(qualityReport ?? "Collecting…");
             }
             GUILayout.Label("Cyan/colours: paths + footprints; red: cliffs/edges; magenta: static blockers.");
             GUILayout.BeginHorizontal();

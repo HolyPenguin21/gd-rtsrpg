@@ -130,9 +130,15 @@ namespace GameDev.RtsRpg
             {
                 if (other == unit || !Conflicts(other.PassageMouth, other.PassageDirection, other.PassageWidth)) continue;
                 if (other.PassageSince < unit.PassageSince || (other.PassageSince == unit.PassageSince
-                    && other.GetInstanceID() < unit.GetInstanceID())) return false;
+                    && TieBreak(other) < TieBreak(unit))) return false;
             }
             return true;
+
+            // Equal request ticks are ordered by a hash of the unit serial and
+            // that tick. The order is stable for one contest and is not a
+            // permanent preference for earlier spawned units.
+            static long TieBreak(UnitMovement candidate) => unchecked(
+                ((long)(uint)((candidate.Serial * -1640531535) ^ (candidate.PassageSince * -2048144789)) << 32) | (uint)candidate.Serial);
 
             bool Conflicts(Vector2Int mouth, int direction, int width)
             {
@@ -150,7 +156,11 @@ namespace GameDev.RtsRpg
             if (unit.Passage == null || !lanes.TryGetValue(unit.Passage, out var state)) return;
             foreach (var inside in state.Inside) if (inside.Unit == unit) return;
             state.Inside.Add((unit, unit.PassageMouth, unit.PassageDirection, unit.PassageWidth));
+            PassageAdmissions++;
         }
+
+        /// <summary>Monotonic count of passage admissions on this component; diagnostics diff it over time.</summary>
+        internal int PassageAdmissions { get; private set; }
 
         private readonly List<UnitMovement> steeringNeighbors = new();
 
@@ -166,12 +176,21 @@ namespace GameDev.RtsRpg
                         if (other != requester && requester.SharesGrid(other)) steeringNeighbors.Add(other);
         }
 
-        internal float TimeToContact(Rect body, Vector2 velocity, float horizon)
+        // Predicted contact time against the collected neighbours. A small
+        // personal-space gap keeps columns from compressing body to body, which
+        // otherwise leaves no room for turns or side steps. Inside that gap
+        // already, only real contact counts, so units can always separate.
+        internal float TimeToContact(Rect body, Vector2 velocity, float horizon, float gap = 0f)
         {
             float earliest = horizon;
             foreach (var other in steeringNeighbors)
             {
                 var obstacle = other.Occupancy;
+                if (gap > 0f)
+                {
+                    var inflated = new Rect(obstacle.x - gap, obstacle.y - gap, obstacle.width + gap * 2f, obstacle.height + gap * 2f);
+                    if (!UnitMovement.Overlaps(body, inflated)) obstacle = inflated;
+                }
                 var relative = velocity - other.PredictionVelocity;
                 float enter = 0f, leave = earliest;
                 if (Axis(body.xMin, body.xMax, obstacle.xMin, obstacle.xMax, relative.x, ref enter, ref leave)
