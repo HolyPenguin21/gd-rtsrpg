@@ -157,7 +157,7 @@ namespace GameDev.RtsRpg
                         var to = FollowEdge(from, i);
                         bool onCorridor = corridor == null || corridor.Contains(to.Cell);
                         if (restrictToCorridor && !onCorridor) continue;
-                        int id = grid.StateId(to), cost = current.Cost + EdgeCost(i);
+                        int id = grid.StateId(to), cost = current.Cost + grid.EdgeCost(from, to, footprint, i);
                         // Skip settled/uncompetitive edges before touching live traffic.
                         if (!frontier.CanImprove(id, cost) || (allowsEdge != null && !allowsEdge(from, to))) continue;
                         frontier.Relax(id, parent, cost, Estimate(to.Cell), onCorridor ? 0 : 1);
@@ -250,24 +250,45 @@ namespace GameDev.RtsRpg
                         int reverseEdges = grid.Edges(to, footprint);
                         for (int i = 0; reverseEdges != 0; i++, reverseEdges >>= 1)
                             if ((reverseEdges & 1) != 0)
-                                frontier.Relax(grid.StateId(FollowEdge(to, i)), parent, current.Cost + EdgeCost(i), 0, 0);
+                            {
+                                var from = FollowEdge(to, i);
+                                frontier.Relax(grid.StateId(from), parent,
+                                    current.Cost + grid.EdgeCost(from, to, footprint, (i + 4) & 7), 0, 0);
+                            }
                     }
 
                     void Visit(NavigationPose from, int edge)
                     {
                         if (!grid.Surface.Contains(from.Cell.x, from.Cell.y)) return;
-                        int cost = current.Cost + EdgeCost(edge), id = grid.StateId(from);
+                        int id = grid.StateId(from);
+                        int cost = current.Cost + grid.EdgeCost(from, to, footprint, edge);
                         if (frontier.CanImprove(id, cost) && (grid.Edges(from, footprint) & (1 << edge)) != 0)
                             frontier.Relax(id, parent, cost, 0, 0);
                     }
                 }
             }
 
-            internal bool TryNext(NavigationPose from, out NavigationPose next)
+            internal bool TryNext(NavigationPose from, Vector2 preferred, out NavigationPose next)
             {
                 next = default;
-                if (!frontier.TryGet(owner.grid.StateId(from), out var node) || node.Parent < 0) return false;
-                next = owner.grid.Pose(frontier[node.Parent].State);
+                var grid = owner.grid;
+                if (!frontier.TryGet(grid.StateId(from), out var node) || node.Parent < 0) return false;
+                next = grid.Pose(frontier[node.Parent].State);
+                float best = float.PositiveInfinity;
+                float preferredDistance = (from.Centre(footprint) - preferred).magnitude;
+                int mask = grid.Edges(from, footprint);
+                for (int i = 0; mask != 0; i++, mask >>= 1)
+                {
+                    if ((mask & 1) == 0) continue;
+                    var option = FollowEdge(from, i);
+                    if (!frontier.TryGet(grid.StateId(option), out var neighbor)
+                        || (neighbor.HeapIndex >= 0 && neighbor.Parent >= 0) || neighbor.Cost >= node.Cost) continue;
+                    float score = neighbor.Cost + grid.EdgeCost(from, option, footprint, i)
+                        + ((option.Centre(footprint) - preferred).magnitude - preferredDistance) * 2f;
+                    if (score >= best) continue;
+                    best = score;
+                    next = option;
+                }
                 return true;
             }
 

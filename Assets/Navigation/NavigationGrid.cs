@@ -186,7 +186,8 @@ namespace GameDev.RtsRpg
         {
             if (!IsAlive || !footprint.IsValid || (uint)pose.Facing > 7) return false;
             Vector2Int size = footprint.Size(pose.Facing);
-            return ClearRectangle(pose.Cell.x, pose.Cell.y, size.x, size.y, blockers.Count != 0);
+            return ClearRectangle(pose.Cell.x, pose.Cell.y, size.x, size.y, blockers.Count != 0)
+                && (!footprint.NeedsTurns || RampDirectionFits(pose.Centre(footprint), NavigationPose.Steps[(int)pose.Facing]));
         }
 
         // Internal edges matter too: a footprint cannot straddle a cliff even at rest.
@@ -207,20 +208,299 @@ namespace GameDev.RtsRpg
             return true;
         }
 
+        // Use the same blocker counts and blocked cell edges for continuous
+        // segments as for graph edges. Short pieces keep the swept rectangle tight.
+        internal bool CanSweep(Vector2 from, Vector2 to, Vector2 halfExtent)
+        {
+            if (!IsAlive) return false;
+            int pieces = Mathf.Max(1, Mathf.CeilToInt(Mathf.Max(Mathf.Abs(to.x - from.x), Mathf.Abs(to.y - from.y)) * 4f));
+            Vector2 previous = from;
+            bool checkBlockers = blockers.Count != 0;
+            const float epsilon = 0.00001f;
+            for (int i = 1; i <= pieces; i++)
+            {
+                Vector2 current = Vector2.Lerp(from, to, (float)i / pieces);
+                int x = Mathf.FloorToInt(Mathf.Min(previous.x, current.x) - halfExtent.x + epsilon);
+                int z = Mathf.FloorToInt(Mathf.Min(previous.y, current.y) - halfExtent.y + epsilon);
+                int endX = Mathf.CeilToInt(Mathf.Max(previous.x, current.x) + halfExtent.x - epsilon);
+                int endZ = Mathf.CeilToInt(Mathf.Max(previous.y, current.y) + halfExtent.y - epsilon);
+                if (!ClearRectangle(x, z, endX - x, endZ - z, checkBlockers)) return false;
+                previous = current;
+            }
+            return true;
+        }
+
+        internal bool NearBoundary(NavigationPose pose, NavigationFootprint footprint)
+        {
+            var size = footprint.Size(pose.Facing);
+            return !ClearRectangle(pose.Cell.x - 1, pose.Cell.y - 1, size.x + 2, size.y + 2, blockers.Count != 0);
+        }
+
+        internal int EdgeCost(NavigationPose from, NavigationPose to, NavigationFootprint footprint, int edge)
+        {
+            int cost = NavigationPathfinder.EdgeCost(edge);
+            if (edge >= 8)
+            {
+                var at = from.Centre(footprint);
+                return cost + (Surface.GetCell((int)at.x, (int)at.y).IsRamp ? 15 : 2);
+            }
+            // A soft terrain-only cost. Narrow routes remain reachable.
+            int x = to.Cell.x, z = to.Cell.y;
+            int index = x + z * Surface.CellsX;
+            return cost + ((cliffs[index] != 0 || x == 0 || z == 0
+                || (cliffs[index - 1] & 1) != 0 || (cliffs[index - Surface.CellsX] & 2) != 0) ? 2 : 0);
+        }
+
+        // Shared topology for straight corridors, bends and junctions. One
+        // connected component is built at a time so competing entrances
+        // cannot acquire different reservations while discovery is suspended.
+        internal sealed class Passage
+        {
+            internal readonly HashSet<Vector2Int> Cells = new();
+            internal bool Ready, Complex;
+            internal int Width = 4;
+            internal int Axes;
+
+            internal bool Overlaps(Rect area)
+            {
+                const float inset = 0.0001f;
+                int maxX = Mathf.CeilToInt(area.xMax - inset);
+                int maxZ = Mathf.CeilToInt(area.yMax - inset);
+                for (int z = Mathf.FloorToInt(area.yMin + inset); z < maxZ; z++)
+                for (int x = Mathf.FloorToInt(area.xMin + inset); x < maxX; x++)
+                    if (Cells.Contains(new Vector2Int(x, z))) return true;
+                return false;
+            }
+        }
+
+        private int passageRevision;
+        private byte[] narrowCells, corePassageCells;
+        private readonly Dictionary<Vector2Int, Passage> passages = new();
+        private readonly Queue<Vector2Int> passageFrontier = new();
+        private Passage buildingPassage;
+
+        private void RefreshPassages()
+        {
+            if (passageRevision == Revision) return;
+            passageRevision = Revision;
+            passages.Clear();
+            passageFrontier.Clear();
+            buildingPassage = null;
+            if (narrowCells == null)
+            {
+                narrowCells = new byte[CellCount];
+                corePassageCells = new byte[CellCount];
+            }
+            else
+            {
+                Array.Clear(narrowCells, 0, narrowCells.Length);
+                Array.Clear(corePassageCells, 0, corePassageCells.Length);
+            }
+        }
+
+        internal void AdvancePassages(int budget)
+        {
+            RefreshPassages();
+            while (buildingPassage != null && budget-- > 0)
+            {
+                var cell = passageFrontier.Dequeue();
+                int shape = PassageShape(cell);
+                buildingPassage.Axes |= shape;
+                buildingPassage.Complex |= buildingPassage.Axes == 3;
+                if ((shape & 1) != 0 && CrossSection(cell.x, cell.y, true, out _, out int widthX))
+                    buildingPassage.Width = Math.Min(buildingPassage.Width, widthX);
+                if ((shape & 2) != 0 && CrossSection(cell.y, cell.x, false, out _, out int widthZ))
+                    buildingPassage.Width = Math.Min(buildingPassage.Width, widthZ);
+                for (int i = 0; i < 8; i += 2)
+                {
+                    var neighbor = cell + NavigationPose.Steps[i];
+                    if (passages.ContainsKey(neighbor) || PassageShape(neighbor) == 0 || !OpenCardinal(cell, neighbor)) continue;
+                    AddPassageCell(neighbor);
+                }
+                if (passageFrontier.Count != 0) continue;
+                buildingPassage.Ready = true;
+                buildingPassage = null;
+            }
+        }
+
+        private void AddPassageCell(Vector2Int cell)
+        {
+            passages.Add(cell, buildingPassage);
+            buildingPassage.Cells.Add(cell);
+            passageFrontier.Enqueue(cell);
+        }
+
+        private int CorePassageAxes(Vector2Int cell)
+        {
+            if (IsBlocked(cell.x, cell.y)) return 0;
+            int id = cell.x + cell.y * Surface.CellsX;
+            if (corePassageCells[id] != 0) return corePassageCells[id] - 1;
+            bool east = OpenCardinal(cell, cell + Vector2Int.right);
+            bool west = OpenCardinal(cell, cell - Vector2Int.right);
+            bool north = OpenCardinal(cell, cell + Vector2Int.up);
+            bool south = OpenCardinal(cell, cell - Vector2Int.up);
+            int shape = ((east || west) && CrossSection(cell.x, cell.y, true, out _, out _) ? 1 : 0)
+                | ((north || south) && CrossSection(cell.y, cell.x, false, out _, out _) ? 2 : 0);
+            corePassageCells[id] = (byte)(shape + 1);
+            return shape;
+        }
+
+        private int PassageShape(Vector2Int cell)
+        {
+            if (IsBlocked(cell.x, cell.y)) return 0;
+            int id = cell.x + cell.y * Surface.CellsX;
+            if (narrowCells[id] != 0) return narrowCells[id] - 1;
+            int shape = CorePassageAxes(cell);
+            if (shape != 3)
+            {
+                int connected = 0;
+                for (int i = 0; i < 8; i += 2)
+                {
+                    var neighbor = cell + NavigationPose.Steps[i];
+                    int axis = i == 0 || i == 4 ? 2 : 1;
+                    if ((connected & axis) == 0 && OpenCardinal(cell, neighbor)
+                        && (CorePassageAxes(neighbor) & axis) != 0) connected |= axis;
+                }
+                // A wider central tile can be the crossing point of two
+                // narrow branches. A single opening into a plaza is not one.
+                if (connected == 3) shape = 3;
+            }
+            narrowCells[id] = (byte)(shape + 1);
+            return shape;
+        }
+
+        private bool OpenCardinal(Vector2Int a, Vector2Int b) => ClearRectangle(
+            Math.Min(a.x, b.x), Math.Min(a.y, b.y), 1 + Math.Abs(a.x - b.x), 1 + Math.Abs(a.y - b.y),
+            blockers.Count != 0);
+
+        internal bool PassageAt(NavigationPose from, NavigationPose to, NavigationFootprint footprint,
+            out Vector2Int cell, out int direction, out int bodyWidth)
+        {
+            RefreshPassages();
+            var delta = to.Cell - from.Cell;
+            if (delta == Vector2Int.zero) delta = NavigationPose.Steps[(int)to.Facing];
+            bool alongX = Math.Abs(delta.x) > Math.Abs(delta.y);
+            direction = alongX ? Math.Sign(delta.x) : Math.Sign(delta.y) * 2;
+            var size = footprint.Size(to.Facing);
+            bodyWidth = alongX ? size.y : size.x;
+            // Query only the next footprint. Longer shortcuts are separately
+            // validated to stay off bottlenecks.
+            for (int z = 0; z < size.y; z++)
+            for (int x = 0; x < size.x; x++)
+            {
+                cell = to.Cell + new Vector2Int(x, z);
+                if (PassageShape(cell) != 0) return true;
+            }
+            var fromSize = footprint.Size(from.Facing);
+            int minX = Math.Min(from.Cell.x, to.Cell.x), minZ = Math.Min(from.Cell.y, to.Cell.y);
+            int maxX = Math.Max(from.Cell.x + fromSize.x, to.Cell.x + size.x);
+            int maxZ = Math.Max(from.Cell.y + fromSize.y, to.Cell.y + size.y);
+            for (int z = minZ; z < maxZ; z++)
+            for (int x = minX; x < maxX; x++)
+            {
+                if (x >= from.Cell.x && x < from.Cell.x + fromSize.x && z >= from.Cell.y && z < from.Cell.y + fromSize.y) continue;
+                cell = new Vector2Int(x, z);
+                if (PassageShape(cell) != 0) return true;
+            }
+            cell = default;
+            return false;
+        }
+
+        internal bool CanSteerAcrossPassage(Rect sweep, Rect current, Passage allowed)
+        {
+            RefreshPassages();
+            const float inset = 0.0001f;
+            int maxX = Mathf.CeilToInt(sweep.xMax - inset), maxZ = Mathf.CeilToInt(sweep.yMax - inset);
+            for (int z = Mathf.FloorToInt(sweep.yMin + inset); z < maxZ; z++)
+            for (int x = Mathf.FloorToInt(sweep.xMin + inset); x < maxX; x++)
+            {
+                var cell = new Vector2Int(x, z);
+                if (allowed != null && allowed.Cells.Contains(cell)) continue;
+                if (x < current.xMax - inset && x + 1 > current.xMin + inset
+                    && z < current.yMax - inset && z + 1 > current.yMin + inset) continue;
+                if (PassageShape(cell) != 0) return false;
+            }
+            return true;
+        }
+
+        internal Passage RequestPassage(Vector2Int cell)
+        {
+            if (passages.TryGetValue(cell, out var existing)) return existing;
+            if (buildingPassage != null) return null;
+            buildingPassage = new Passage();
+            AddPassageCell(cell);
+            return buildingPassage;
+        }
+
+        internal bool IsRampPose(NavigationPose pose, NavigationFootprint footprint)
+        {
+            var at = pose.Centre(footprint);
+            return Surface.Contains((int)at.x, (int)at.y) && Surface.GetCell((int)at.x, (int)at.y).IsRamp;
+        }
+
+        internal float FormationClearance(NavigationPose pose, NavigationFootprint footprint, Vector2 direction)
+        {
+            var axis = Math.Abs(direction.x) > Math.Abs(direction.y) ? Vector2Int.up : Vector2Int.right;
+            float width = 0f;
+            for (int side = -1; side <= 1; side += 2)
+            for (int distance = 1; distance <= 2; distance++)
+            {
+                var from = new NavigationPose(pose.Cell + axis * (side * (distance - 1)), pose.Facing);
+                if (!StepClear(from, axis * side, footprint, blockers.Count != 0)) break;
+                width += 1f;
+            }
+            return width * 0.25f;
+        }
+
+        private bool CrossSection(int position, int cross, bool alongX, out int first, out int width)
+        {
+            first = cross;
+            width = 1;
+            if (!Clear(cross, 1)) return false;
+            while (width < 4 && Clear(first - 1, width + 1)) { first--; width++; }
+            while (width < 4 && Clear(first, width + 1)) width++;
+            return width < 4;
+
+            bool Clear(int start, int span) => alongX
+                ? ClearRectangle(position, start, 1, span, blockers.Count != 0)
+                : ClearRectangle(start, position, span, 1, blockers.Count != 0);
+        }
+
         public bool CanStep(NavigationPose from, NavigationPose to, NavigationFootprint footprint)
         {
             using var marker = StepMarker.Auto();
             if (!IsAlive || !footprint.IsValid || (uint)from.Facing > 7 || from.Facing != to.Facing
                 || !Surface.Contains(from.Cell.x, from.Cell.y) || !Surface.Contains(to.Cell.x, to.Cell.y)) return false;
             Vector2Int delta = to.Cell - from.Cell;
-            if (footprint.NeedsTurns && delta != NavigationPose.Steps[(int)from.Facing]) return false;
+            if (footprint.NeedsTurns && (delta != NavigationPose.Steps[(int)from.Facing]
+                || !RampAligned(from, delta, footprint))) return false;
             if (Math.Abs(delta.x) > 1 || Math.Abs(delta.y) > 1 || delta == Vector2Int.zero) return false;
             return StepClear(from, delta, footprint, blockers.Count != 0);
         }
 
-        // Yielding is an explicit recovery manoeuvre and may take a side/back step.
+        private bool RampAligned(NavigationPose from, Vector2Int delta, NavigationFootprint footprint)
+        {
+            var centre = from.Centre(footprint);
+            return RampDirectionFits(centre, delta) && RampDirectionFits(centre + (Vector2)delta, delta);
+        }
+
+        private bool RampDirectionFits(Vector2 point, Vector2Int direction)
+        {
+            int x = Mathf.FloorToInt(point.x), z = Mathf.FloorToInt(point.y);
+            if (!Surface.Contains(x, z)) return false;
+            var cell = Surface.GetCell(x, z);
+            if (!cell.IsRamp) return true;
+            var uphill = TerrainSurface.Step(cell.Uphill);
+            return direction == uphill || direction == -uphill;
+        }
+
+        // Yield may reverse along a ramp but still needs its full swept footprint.
         internal bool CanYieldStep(NavigationPose from, NavigationPose to, NavigationFootprint footprint)
-            => IsAlive && StepClear(from, to.Cell - from.Cell, footprint, blockers.Count != 0);
+        {
+            Vector2Int delta = to.Cell - from.Cell;
+            return IsAlive && StepClear(from, delta, footprint, blockers.Count != 0)
+                && (!footprint.NeedsTurns || RampAligned(from, delta, footprint));
+        }
 
         private bool StepClear(NavigationPose from, Vector2Int delta, NavigationFootprint footprint, bool checkBlockers)
         {
@@ -244,7 +524,7 @@ namespace GameDev.RtsRpg
             // Every intermediate body orientation fits in a radius of sqrt(5)/2.
             // Both centres use half-cell increments, so that radius always reaches
             // at least one cell past the floor/ceil of either centre.
-            if (!Surface.Contains(from.Cell.x, from.Cell.y)) return false;
+            if (!Surface.Contains(from.Cell.x, from.Cell.y) || IsRampPose(from, footprint) || IsRampPose(to, footprint)) return false;
             Vector2Int a = footprint.Size(from.Facing), b = footprint.Size(to.Facing);
             int minX = ((Math.Min(a.x, b.x) + 1) >> 1) - 2;
             int minZ = ((Math.Min(a.y, b.y) + 1) >> 1) - 2;
@@ -267,7 +547,8 @@ namespace GameDev.RtsRpg
                 int first = footprint.NeedsTurns ? (int)pose.Facing : 0;
                 int last = footprint.NeedsTurns ? first + 1 : 8;
                 for (int i = first; i < last; i++)
-                    if (StepClear(pose, NavigationPose.Steps[i], footprint, false)) mask |= 1 << i;
+                    if (StepClear(pose, NavigationPose.Steps[i], footprint, false)
+                        && (!footprint.NeedsTurns || RampAligned(pose, NavigationPose.Steps[i], footprint))) mask |= 1 << i;
                 if (footprint.NeedsTurns)
                 {
                     if (TurnClear(pose, pose.Turn(-1), footprint, false)) mask |= 1 << 8;

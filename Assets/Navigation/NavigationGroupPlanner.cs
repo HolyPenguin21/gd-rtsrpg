@@ -148,11 +148,17 @@ namespace GameDev.RtsRpg
             private readonly int radius, revision;
             private readonly bool[] visited;
             private int cursor, boundaryCursor;
+            private TargetFlood previous, field;
+            internal bool JoinsPrevious { get; private set; }
+            internal bool JoinsField { get; private set; }
             internal List<Vector2Int> Cells { get; } = new();
             internal List<Vector2Int> EntryCells { get; } = new();
 
-            internal TargetFlood(NavigationGrid grid, Vector2Int target, int radius)
+            internal TargetFlood(NavigationGrid grid, Vector2Int target, int radius,
+                TargetFlood previous = null, TargetFlood field = null)
             {
+                this.previous = previous;
+                this.field = field;
                 this.grid = grid;
                 this.target = target;
                 this.radius = radius;
@@ -167,17 +173,27 @@ namespace GameDev.RtsRpg
             private int Index(Vector2Int cell) =>
                 cell.x - target.x + radius + (cell.y - target.y + radius) * (radius * 2 + 1);
 
-            internal bool Contains(Vector2Int cell) => Math.Abs(cell.x - target.x) <= radius
+            internal int Radius => radius;
+
+            internal bool Contains(Vector2Int cell) => grid.IsAlive && revision == grid.Revision && Math.Abs(cell.x - target.x) <= radius
                 && Math.Abs(cell.y - target.y) <= radius && visited[Index(cell)];
 
             internal bool Advance(NavigationBudget budget)
             {
                 using var marker = Marker.Auto();
-                if (!grid.IsAlive || revision != grid.Revision) { Cells.Clear(); EntryCells.Clear(); return true; }
+                if (!grid.IsAlive || revision != grid.Revision)
+                {
+                    Cells.Clear();
+                    EntryCells.Clear();
+                    previous = field = null;
+                    return true;
+                }
                 while (cursor < Cells.Count)
                 {
                     if (!budget.Take()) return false;
                     var pose = new NavigationPose(Cells[cursor++]);
+                    if (!JoinsPrevious && previous != null) JoinsPrevious = previous.Contains(pose.Cell);
+                    if (!JoinsField && field != null) JoinsField = field.Contains(pose.Cell);
                     int mask = grid.Edges(pose, Single);
                     for (int i = 0; i < 8; i += 2)
                     {
@@ -202,6 +218,7 @@ namespace GameDev.RtsRpg
                         break;
                     }
                 }
+                previous = field = null;
                 return true;
             }
         }
@@ -221,12 +238,17 @@ namespace GameDev.RtsRpg
             NavigationFacing preferred = NavigationFacing.North)
         {
             int orientations = footprint.Orientations;
-            int rank = cursor % orientations;
+            Vector2Int cell = area[cursor / orientations];
+            int rank = cursor++ % orientations;
+            return TryCandidate(footprint, cell, rank, reserved, ownSlot, preferred, out pose);
+        }
+
+        internal bool TryCandidate(NavigationFootprint footprint, Vector2Int cell, int rank,
+            HashSet<Vector2Int> reserved, NavigationPose? ownSlot, NavigationFacing preferred, out NavigationPose pose)
+        {
             int facing = footprint.NeedsTurns ? ((int)preferred + rank * 2 + rank / 4) & 7 : 0;
-            pose = new NavigationPose(area[cursor / orientations], (NavigationFacing)facing);
-            cursor++;
-            if (!grid.CanOccupy(pose, footprint)) return false;
-            return CanReserve(pose, footprint, reserved, ownSlot);
+            pose = new NavigationPose(cell, (NavigationFacing)facing);
+            return grid.CanOccupy(pose, footprint) && CanReserve(pose, footprint, reserved, ownSlot);
         }
 
         internal static bool CanReserve(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved,
