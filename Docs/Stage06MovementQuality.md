@@ -1,0 +1,81 @@
+# Stage 06.1 — качество группового движения (Issue #20), проход 1
+
+> **Статус: UNITY NOT RUN; BEHAVIOR NOT VERIFIED.** Этот документ описывает первый законченный проход: диагностику, исправление конкретных причин из статического аудита и методику замеров. Уровень «как в StarCraft II» **не заявляется**. Baseline и after в Unity ещё не сняты, PASS по поведению нет ни для одного пункта D1–D11.
+
+## 1. Baseline и среда
+
+- База: `main` `da013dd` (Stage 06, PR #21). Ветка `stage/06.1-movement-quality`.
+- Unity 6000.5.4f1 был открыт на машине исполнителя, но проект заблокирован открытым редактором. Пакета Unity Pipeline для удалённого управления редактором в проекте нет; новые пакеты без решения владельца не добавляются. Поэтому Play Mode, Profiler, записи Game View и все числа D1–D10 — **NOT RUN**.
+- Выполнено: офлайн-сборка `Assembly-CSharp.csproj` (`dotnet build --no-incremental`, ссылки Unity 6000.5.4f1): 0 ошибок, 0 предупреждений; `git diff --check`.
+- Попутно исправлена ошибка компиляции в Unity 6000.5: `Object.GetInstanceID()` (CS0619) в `TerrainNavigation.CanEnterPassage`.
+
+## 2. Аудит цепочки вызовов (A2)
+
+`RtsControls` → `RtsOrders.Issue` → `NavigationDemo.QueueOrder` → `SwitchDispatch` → `Update`: `AdvanceGuide` (`TargetFlood` + `NavigationPathfinder.BeginGuide`) → `AcceptTarget` → `LaunchParticipants` (`UnitMovement.TryLaunch`) → `StartParticipantPlan`/`AdvanceParticipantPlan` (`ApproachField`, локальный и полный A*, `ChooseSlot`) → `UnitMovement.Assign`. Затем `TerrainNavigation.FixedUpdate`: `CaptureTick` → `PrepareTick` (стык маршрута, выбор ребра, запрос прохода) → `PrepareSteering` (кандидаты по одному снимку) → `MoveTick` (повторная проверка живой занятости, commit). Состояние приказа читается через `ReadOrderProgress`.
+
+Второго A*, второго fixed-step исполнителя или второго хранилища приказов нет, и этот проход их не добавляет. Перенос диспетчера из `NavigationDemo` в отдельный координатор (A5) **не выполнялся**: для этого нужен architecture delta и одобрение владельца.
+
+### Найденные причины, которые исправлены
+
+| # | Критерий | Причина в коде (до правки) | Исправление |
+|---|---|---|---|
+| 1 | B2, D2 mirror dance | Сторона обхода `detourSide` сбрасывалась в конце **каждого** графового ребра (`FinishEdge`) и задавалась также боковой коррекцией строя. Вес предпочтения 0,12 был слабее колебаний члена time-to-contact (×1,5). Манёвр длиннее одной ячейки терял выбранную сторону | Отдельная фиксация `avoidSide` на 0,6 с, которая не сбрасывается на рёбрах. Пока она действует, свой бок получает +0,45, противоположный −0,45. Без фиксации — небольшое правостороннее предпочтение +0,06: при лобовом сближении это противоположные мировые стороны, и симметрия ломается. Смена стороны при действующей фиксации считается (`SideFlips`) |
+| 2 | B1, D8 смена приказа | `QueueOrder` оставлял движущемуся юниту **старый** маршрут, пока не придёт новый план (3 параллельных плана на 64–100 юнитов). При развороте приказа армия заметно шла в старую сторону. Одноразовый launcher пропускал юнитов, которые в момент принятия цели ещё были на ребре | Юнит, чья скорость направлена **от** новой цели, завершает текущее проверенное ребро и останавливается на якоре; юниты, идущие к цели, сохраняют движение (без массового стопа). `LaunchLate` раздаёт тот же безопасный короткий участок `TryLaunch` юнитам, которые стали доступны позже, не более 16 проверок за кадр в общем бюджете |
+| 3 | D5, D11 причины | Вражеское и союзное тело на пути давали одинаковый `Hold.Traffic`, HUD не мог показать `EnemyBlocked` | `Hold.Enemy` при живом вражеском контакте на commit; `GroupRouteProgress.EnemyBlocked`, HUD `EnemyBlocked N`. Обход (`TryDetour`) срабатывает и для `Enemy`; враг по-прежнему не продавливается |
+| 4 | B4 fairness | Равные тики запроса прохода решались меньшим `GetInstanceID()`: вечный приоритет ранее созданных, плюс CS0619 в Unity 6000.5 | Стабильный `UnitMovement.Serial`; ничья решается хэшем `(Serial, PassageSince)`, порядок меняется от состязания к состязанию |
+| 5 | E3, D1 метрики | Задержка старта считалась только в пресете Army; юнит, продолжающий старый маршрут в любую сторону, считался «начавшим» | Задержка от момента **своего** приказа (клик RMB/F+LMB, пресет, принятая цель Follow Mouse) до первого тика со скоростью к **своей** цели. Счётчики ниже |
+
+## 3. Диагностика (E3)
+
+Панель `NavigationDemo` → **Movement quality counters** (по умолчанию выключено, поле `qualityDiagnostics`). Строка собирается 4 раза в секунду вместе с существующим отчётом, ничего не пишет в Console, не создаёт объектов и материалов. Счётчики юнитов монотонны; панель вычитает базу, записанную при приказе.
+
+| Показатель | Что считается | Источник |
+|---|---|---|
+| Start p50/p90/p99, started N/M | Секунды от приказа юнита до движения к его цели; `pending`, пока доля не набрана | `NavigationDemo.Update`, `Participant.StartDelay` |
+| Side flips, max/unit | Смены стороны при действующей фиксации | `UnitMovement.SideFlips` |
+| Commit rejects | Шаг прошёл прогноз, но не прошёл живую проверку занятости при commit | `UnitMovement.ClearanceRejects` |
+| Corner retries | Повторные геометрические отказы у границы | `UnitMovement.CornerRetries` |
+| Enemy holds | Юниты в `Hold.Enemy` сейчас | `HoldReason` |
+| Plans, max/unit | Запуски планов участника с последнего приказа | `Participant.Plans` |
+| Passage wait mean/max | Время непрерывного ожидания допуска в проход | `UnitMovement.PassageWaitTotal/Max` |
+| Admitted/s | Допуски в проход за интервал отчёта (игровое время) | `TerrainNavigation.PassageAdmissions` |
+| Gen0 GC | Сборки поколения 0 между отчётами | `GC.CollectionCount(0)` |
+
+Существующие строки сохраняются: Holds (теперь с `enemy`), turns/stops, Planning ms и байты, expansions, assignments, A*, Frame p95. CPU по модулям — маркеры Profiler `Navigation.PlanningFrame`, `Navigation.MotionTick`, `Navigation.FindContact`, `Navigation.UnitMovement`, `Navigation.AdvanceParticipant`, `Navigation.AdvanceGuide`, `Navigation.OnGUI`.
+
+## 4. Матрица «критерий → реализация → доказательство» (E1)
+
+Ссылки на строки — по ветке `stage/06.1-movement-quality` на момент PR. **Поведение: NOT RUN везде.** «PASS по исходникам» означает только доказанную причинную структуру кода.
+
+| Критерий | Реализация (файл:строки) | Владелец данных | Инвариант | Исходники | Поведение |
+|---|---|---|---|---|---|
+| B1/D1 общий старт | `NavigationDemo.LaunchParticipants`, `LaunchLate` (~1311), `UnitMovement.TryLaunch` | Dispatcher (`NavigationDemo`) | Пробный участок только по проверенным рёбрам `grid.Edges`, вне проходов, с приближением к цели; конец — безопасный якорь | PASS | NOT RUN |
+| B1/D8 смена приказа | `QueueOrder` ~205–211, `AcceptTarget` ~1268–1273 | Dispatcher → `UnitMovement` | Нет телепорта и переспауна; стоп только у юнитов со скоростью от цели и только на проверенном якоре | PASS | NOT RUN |
+| B2/D2 mirror dance | `UnitMovement.PrepareSteering` ~464–518, константа ~91 | `UnitMovement` | Каждый кандидат проходит `grid.CanSweep` и `TimeToContact` по общему снимку; commit повторно проверяет живую занятость (`MoveTick` ~630) | PASS | NOT RUN |
+| B3 союзники | `YieldForFriendly`, `Avoids` (без изменений) | `UnitMovement` | Уступает только неподвижный союзник без активного маршрута, одним проверенным шагом; приказ остаётся у dispatcher | PASS (Stage 05.3) | NOT RUN |
+| B3/D5 враги | `MoveTick` ~630–638, `ReadOrderProgress` ~317/327, `RtsOrders.Describe` | `UnitMovement`, `RtsOrders` | Враг — препятствие без yield/push; обход только по проверенному ребру | PASS | NOT RUN |
+| B4/D3/D4 проходы | `TerrainNavigation.CanEnterPassage` ~121–150, `EnterPassage` | `TerrainNavigation` | Более раннее ожидание первым; ничья по хэшу, без вечного приоритета; допуск до выхода габарита | PASS | NOT RUN |
+| B5/D6 прибытие | `ChooseSlot`, `NavigationGroupPlanner.Reserve` (без изменений) | Dispatcher | Одно резервирование на юнит; `Arrived` только при позе == месту | PASS (Stage 05.3) | NOT RUN |
+| B6/D7 конь 1×2 | `PrepareSteering` (только угол 0 для `NeedsTurns`), `TryMountedDetour` | `UnitMovement` | Фиксация стороны не меняет 1×2: перебор сторон для него отключён | PASS (без регрессии) | NOT RUN |
+| B7/D9 revision/lifecycle | `RecoverRevision`, `OnDisable` (сброс `avoidSide`, `passageWaitRun`) | `UnitMovement`, `TerrainNavigation` | Новые поля сбрасываются вместе с юнитом; ни одно не держит резерв или допуск | PASS | NOT RUN |
+| D10 производительность | `LaunchLate` ≤16 `budget.Take()` за кадр; отчёт 4 Гц | — | Нет новых проходов all-to-all; steering использует те же корзины | PASS | NOT RUN |
+| D11 причины | `Hold.Enemy`, `EnemyBlocked` | `UnitMovement`, `RtsOrders` | Временный затор (Traffic/Passage/Enemy) отличен от `NoPath` | PASS | NOT RUN |
+
+## 5. Открыто и сознательно не сделано в этом проходе
+
+- **Baseline до/после, записи Game View, p50/p95/max кадра, GC/кадр, 128×128** — нужен Play Mode. Без них задачу закрывать нельзя (E4).
+- Ширинно-зависимый многополосный поток в узком проходе (B4/D3), раннее сжатие строя и восстановление ширины, обмен слотами до финальной пробки (B5): код Stage 05.3 сохранён, улучшения требуют замеров, а не подбора коэффициентов вслепую.
+- Отдельный координатор вместо `NavigationDemo` (A5) — только после architecture delta и одобрения владельца.
+- Направление «от цели» берётся из скорости прошлого тика. Юнит, стоящий в ожидании (скорость 0) на старом маршруте от цели, продолжит его до прихода нового плана.
+
+## 6. Ручной прогон для приёмки
+
+Одинаковые машина, разрешение, Game View, seed 104729 и 130363, 64×64, затем 128×128. Сначала `main` `da013dd` (baseline), затем ветка. На ветке включить **Movement quality counters**; на baseline использовать существующие строки панели и Profiler.
+
+1. **D1.** Army (100), дождаться остановки. Выделить всех рамкой, RMB на открытое место. Записать Start p50/p90/p99, turns/stops. Цель: ≥90% ≤0,75 с, ≥99% ≤1,5 с.
+2. **D8.** Во время движения RMB в противоположную сторону, затем 10 приказов за 5 с. Проверить: нет продолжения в старую сторону дольше одного ребра, последний приказ выполнен, `Plans max/unit`, отсутствие starvation.
+3. **D2.** Open crossing; выбрать по одному 1×1 с каждой стороны и дать встречные RMB. Также 1×1/2×2 и 1×2/1×1. Записать Side flips (цель: ни одна пара ≥3) и Commit rejects.
+4. **D3/D4.** One lane, Bent passage, Junction: Passage wait mean/max, Admitted/s, число переключений направления.
+5. **D5.** Enemy lane и Sealed lane: HUD должен показать `EnemyBlocked`, а не `Blocked`; после Release lane — восстановление.
+6. **D6/D7/D9** — по сценариям [Stage05Movement.md](Stage05Movement.md) и [Stage06Controls.md](Stage06Controls.md).
+7. **D10.** Profiler: маркеры из раздела 3, GC Alloc/кадр, p95 кадра. Сравнить с baseline (допуск +10% p95).

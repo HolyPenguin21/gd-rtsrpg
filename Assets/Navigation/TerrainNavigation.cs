@@ -130,9 +130,15 @@ namespace GameDev.RtsRpg
             {
                 if (other == unit || !Conflicts(other.PassageMouth, other.PassageDirection, other.PassageWidth)) continue;
                 if (other.PassageSince < unit.PassageSince || (other.PassageSince == unit.PassageSince
-                    && other.GetInstanceID() < unit.GetInstanceID())) return false;
+                    && TieBreak(other) < TieBreak(unit))) return false;
             }
             return true;
+
+            // Equal request ticks are ordered by a hash of the unit serial and
+            // that tick. The order is stable for one contest and is not a
+            // permanent preference for earlier spawned units.
+            static long TieBreak(UnitMovement candidate) => unchecked(
+                ((long)(uint)((candidate.Serial * -1640531535) ^ (candidate.PassageSince * -2048144789)) << 32) | (uint)candidate.Serial);
 
             bool Conflicts(Vector2Int mouth, int direction, int width)
             {
@@ -150,7 +156,11 @@ namespace GameDev.RtsRpg
             if (unit.Passage == null || !lanes.TryGetValue(unit.Passage, out var state)) return;
             foreach (var inside in state.Inside) if (inside.Unit == unit) return;
             state.Inside.Add((unit, unit.PassageMouth, unit.PassageDirection, unit.PassageWidth));
+            PassageAdmissions++;
         }
+
+        /// <summary>Monotonic count of passage admissions on this component; diagnostics diff it over time.</summary>
+        internal int PassageAdmissions { get; private set; }
 
         private readonly List<UnitMovement> steeringNeighbors = new();
 

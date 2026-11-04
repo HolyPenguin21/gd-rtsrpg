@@ -65,6 +65,7 @@ namespace GameDev.RtsRpg
             if (progress.Moving > 0) result += $" · Moving {progress.Moving}";
             if (progress.Arrived > 0) result += $" · Arrived {progress.Arrived}";
             if (progress.Blocked > 0) result += $" · Blocked {progress.Blocked}";
+            if (progress.EnemyBlocked > 0) result += $" · EnemyBlocked {progress.EnemyBlocked}";
             if (progress.NoPath > 0) result += $" · NoPath {progress.NoPath}";
             if (progress.BudgetExceeded > 0) result += $" · BudgetExceeded {progress.BudgetExceeded}";
             if (stale > 0) result += $" · Stale {stale}";

@@ -11,7 +11,9 @@ namespace GameDev.RtsRpg
         private static readonly ProfilerMarker Marker = new("Navigation.UnitMovement");
         private const int LookAhead = 5;
         public enum Motion { Moving, Yielding, Waiting, RepathPending, Blocked, Arrived, Invalidated }
-        internal enum Hold { None, Planning, Geometry, Traffic, Passage }
+        // Traffic is an allied or unclassified predicted contact; Enemy is a
+        // confirmed hostile body on the committed sweep. Enemies are never pushed.
+        internal enum Hold { None, Planning, Geometry, Traffic, Passage, Enemy }
 
         private TerrainNavigation navigation;
         private NavigationGrid grid;
@@ -39,6 +41,9 @@ namespace GameDev.RtsRpg
         private static readonly float[] SteeringAngles = { 0f, 18f, -18f, 36f, -36f, 62f, -62f };
         private static readonly float[] SteeringSpeeds = { 1f, 0.65f, 0.32f };
         private int passageDirection, previousPassageDirection, passageWidth, passageSince;
+        private static int nextSerial;
+        /// <summary>Stable per-session identity for deterministic tie-breaks; replaces deprecated instance IDs.</summary>
+        internal int Serial { get; private set; }
         internal Vector2Int Bucket { get; set; }
         public Motion State { get; private set; }
         public NavigationStatus Status { get; private set; }
@@ -52,6 +57,7 @@ namespace GameDev.RtsRpg
         internal bool IsRecoveringRevision => CurrentGrid && (revisionHold || revisionRecovery || revision != grid.Revision);
         internal bool AtAnchor => !revisionHold && progress == 0f && !yieldTarget.HasValue && !retreating;
         internal bool HasRoute => (path != null && path.IsCurrent) || (pending != null && pending.IsCurrent);
+        internal bool StopsAfterEdge => stopAfterEdge;
         internal bool RequiresCornerRecovery => cornerFailures > 0 && cornerRevision == grid.Revision
             && (restingPose.Cell - failedCorner.Cell).sqrMagnitude <= 4;
         internal bool CanLaunch => CanPlan && AtAnchor && !HasRoute && Time.time >= yieldUntil;
@@ -69,6 +75,22 @@ namespace GameDev.RtsRpg
         internal int MotionTicks { get; private set; }
         internal int TurnCount { get; private set; }
         internal int StopCount { get; private set; }
+        // Development counters (Stage 06.1). Monotonic; consumers diff them against an order baseline.
+        internal int SideFlips { get; private set; }
+        internal int ClearanceRejects { get; private set; }
+        internal int CornerRetries { get; private set; }
+        internal float PassageWaitMax { get; private set; }
+        internal float PassageWaitTotal { get; private set; }
+        internal Vector2 Position => centre;
+        internal Vector2 TravelVelocity => PredictionVelocity;
+        private float passageWaitRun;
+
+        // Local avoidance side commitment, independent of graph edges. It
+        // survives edge completion so a dodge spanning several cells keeps one
+        // side; it expires only after the threat has been absent for a while.
+        private const float AvoidCommitSeconds = 0.6f;
+        private int avoidSide;
+        private float avoidUntil;
 
         internal bool ReservesPassage(NavigationGrid.Passage zone) => !revisionHold && (zone.Overlaps(Occupancy)
             || (activeEdge && progress > 0f && zone.Overlaps(BoundsAt(edgeStart, edgeYaw))));
@@ -85,6 +107,7 @@ namespace GameDev.RtsRpg
                 || !owner.Grid.CanOccupy(route.Points[0].Pose, size)) return false;
             navigation = owner;
             grid = owner.Grid;
+            if (Serial == 0) Serial = ++nextSerial;
             Footprint = size;
             Team = faction;
             cellSize = grid.LocalToWorld.MultiplyVector(Vector3.right).magnitude * grid.Surface.BlockWorldSize / 4;
@@ -226,7 +249,8 @@ namespace GameDev.RtsRpg
             passage = previousPassage = null;
             hasTravelHeading = false;
             formationWidth = 1f;
-            cornerFailures = 0;
+            cornerFailures = avoidSide = 0;
+            passageWaitRun = 0f;
             State = Motion.Invalidated;
         }
 
@@ -273,7 +297,8 @@ namespace GameDev.RtsRpg
             }
             if (!activeEdge && EnemyContact == null && path != null && next < path.Points.Count)
                 SelectEdge();
-            else if (activeEdge && progress == 0f && HoldReason == Hold.Traffic && path != null && Time.fixedTime >= nextDetour)
+            else if (activeEdge && progress == 0f && (HoldReason == Hold.Traffic || HoldReason == Hold.Enemy)
+                && path != null && Time.fixedTime >= nextDetour)
             {
                 nextDetour = Time.fixedTime + 0.10f;
                 TryDetour(edgeEnd);
@@ -437,6 +462,12 @@ namespace GameDev.RtsRpg
             }
 
             int angles = steerLaterally ? SteeringAngles.Length : 1;
+            // A committed side dominates the per-tick contact estimate, so two
+            // agents cannot alternate sides as their predictions oscillate.
+            // Uncommitted, both prefer their own right: in a head-on approach
+            // that is opposite world sides, which breaks the mirror symmetry.
+            bool committed = avoidSide != 0 && Time.fixedTime < avoidUntil;
+            int bestSide = 0;
             for (int i = 0; i < angles; i++)
             {
                 float angle = Footprint.NeedsTurns ? Heading(direct)
@@ -460,16 +491,30 @@ namespace GameDev.RtsRpg
                     // Reward progress, clearance and the previously selected
                     // side. A slower candidate can beat a fast collision course.
                     float side = direct.x * direction.y - direct.y * direction.x;
+                    int candidateSide = i == 0 ? 0 : Math.Sign(SteeringAngles[i]);
+                    float sideTerm = candidateSide == 0 ? 0f
+                        : committed ? (candidateSide == avoidSide ? 0.45f : -0.45f)
+                        : candidateSide > 0 ? 0.06f : 0f;
                     float score = forward * SteeringSpeeds[j] + safe / horizon * 1.5f
-                        + Vector2.Dot(desired, direction) * 0.22f
+                        + Vector2.Dot(desired, direction) * 0.22f + sideTerm
                         + (detourSide != 0 && side * detourSide > 0.05f ? 0.12f : 0f);
                     if (score <= best) continue;
                     best = score;
                     steeringPoint = point;
                     steeringHeading = angle;
                     steeringReady = true;
+                    bestSide = candidateSide;
                     if (i == 0 && j == 0 && safe >= horizon) return;
                 }
+            }
+            if (steeringReady && bestSide != 0)
+            {
+                // Only a lateral avoidance choice renews the commitment. A
+                // switch while committed means the committed side became
+                // unsafe or geometrically closed; it is counted, not hidden.
+                if (committed && bestSide != avoidSide) SideFlips++;
+                avoidSide = bestSide;
+                avoidUntil = Time.fixedTime + AvoidCommitSeconds;
             }
             if (!steeringReady)
             {
@@ -585,9 +630,12 @@ namespace GameDev.RtsRpg
             var obstruction = Blocker(sweep);
             if (obstruction != null)
             {
+                // Prediction accepted this step but the live occupancy check
+                // rejected it at commit time.
+                ClearanceRejects++;
                 if (obstruction.Team == Team && wait >= 0.15f && !retreating)
                     obstruction.YieldForFriendly(end - centre, this);
-                Wait(Hold.Traffic, dt);
+                Wait(obstruction.Team == Team ? Hold.Traffic : Hold.Enemy, dt);
                 if (!revisionRecovery && wait >= 0.85f && !retreating)
                 {
                     RecoverBlockedEdge();
@@ -619,7 +667,7 @@ namespace GameDev.RtsRpg
             centre = proposed;
             facing = proposedYaw;
             progress = proposedProgress;
-            wait = 0f;
+            wait = passageWaitRun = 0f;
             if (edgeAngle == 0f)
             {
                 var direction = (end - edgeStart).normalized;
@@ -660,6 +708,7 @@ namespace GameDev.RtsRpg
 
         private void RecordCornerFailure(NavigationPose destination)
         {
+            CornerRetries++;
             if (cornerRevision == grid.Revision && failedCorner.Equals(restingPose) && failedDirection.Equals(destination))
                 cornerFailures++;
             else
@@ -674,6 +723,12 @@ namespace GameDev.RtsRpg
         private void Wait(Hold reason, float dt)
         {
             if (HoldReason == Hold.None && MotionTicks > 0) StopCount++;
+            if (reason == Hold.Passage)
+            {
+                passageWaitRun += dt;
+                PassageWaitTotal += dt;
+                PassageWaitMax = Mathf.Max(PassageWaitMax, passageWaitRun);
+            }
             speed = 0f;
             wait += dt;
             HoldReason = reason;
