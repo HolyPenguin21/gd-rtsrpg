@@ -156,8 +156,13 @@ namespace GameDev.RtsRpg
         private void Invalidate()
         {
             paths.Clear(); ClearLines();
-            followMouse = false;
-            requestedTarget = hoverTarget = lastRejectedTarget = null;
+            bool sameGrid = sessionGrid != null && sessionGrid == Grid && Grid.IsAlive;
+            var restart = requestedTarget ?? (GuideActive && !guideFromHover ? guideTarget : (Vector2Int?)null) ?? acceptedTarget;
+            var latestHover = hoverTarget ?? (GuideActive && guideFromHover ? guideTarget : (Vector2Int?)null);
+            if (!sameGrid) followMouse = false;
+            requestedTarget = sameGrid ? restart : null;
+            hoverTarget = sameGrid && followMouse ? latestHover : null;
+            lastRejectedTarget = null;
             CancelGuide();
             CancelParticipantPlans();
             if (sessionGrid != null && sessionGrid != Grid)
@@ -170,7 +175,6 @@ namespace GameDev.RtsRpg
                 foreach (var entry in units) { entry.RetryAt = 0; entry.Failures = entry.NextCandidate = 0; entry.LastAttempt = null; }
             if (acceptedTarget.HasValue && sessionGrid == Grid && Grid != null)
             {
-                requestedTarget = acceptedTarget;
                 ClearFields();
                 targetArea = null;
                 acceptedArea = fieldArea = null;
@@ -693,14 +697,24 @@ namespace GameDev.RtsRpg
             for (int i = units.Count - 1; i >= 0; i--)
             {
                 var entry = units[i];
-                if (entry.Unit != null && entry.Unit.isActiveAndEnabled) continue;
+                bool alive = entry.Unit != null && entry.Unit.isActiveAndEnabled;
+                if (alive && !entry.Unit.IsRevisionHeld) continue;
                 for (int j = participantPlans.Count - 1; j >= 0; j--)
                     if (participantPlans[j].Entry == entry)
                     {
                         CancelParticipantPlan(participantPlans[j]);
                         participantPlans.RemoveAt(j);
                     }
-                if (entry.Reserved) NavigationGroupPlanner.Reserve(entry.Destination.Value, entry.Footprint, reservations, false);
+                if (entry.Reserved)
+                    NavigationGroupPlanner.Reserve(entry.Destination.Value, entry.Footprint, reservations, false);
+                if (alive)
+                {
+                    entry.Reserved = entry.Assigned = false;
+                    entry.SlotRoute = null;
+                    entry.LastAttempt = null;
+                    entry.RetryAt = 0f;
+                    continue;
+                }
                 units.RemoveAt(i);
                 if (i < launchCursor) launchCursor--;
             }
@@ -833,7 +847,7 @@ namespace GameDev.RtsRpg
             }
         }
 
-        private bool DispatchPending() => targetArea != null && units.Exists(entry => !entry.LastAttempt.HasValue);
+        private bool DispatchPending() => targetArea != null && units.Exists(entry => !entry.Unit.IsRevisionHeld && !entry.LastAttempt.HasValue);
 
         private int SearchLimit(NavigationFootprint size) => Grid.Surface.CellsX * Grid.Surface.CellsZ * size.Orientations;
 
@@ -841,7 +855,10 @@ namespace GameDev.RtsRpg
         {
             using var marker = GuideMarker.Auto();
             if (!armyDemo || !budget.CanContinue) return;
-            if (requestedTarget.HasValue && guideFromHover) CancelGuide();
+            if ((requestedTarget.HasValue && guideFromHover)
+                || (guideFromHover && guideSearch == null && hoverTarget.HasValue && hoverTarget.Value != guideTarget
+                    && units.Exists(entry => entry.Unit.IsRecoveringRevision)))
+                CancelGuide();
             if (!GuideActive)
             {
                 bool fromHover = !requestedTarget.HasValue;
@@ -858,6 +875,11 @@ namespace GameDev.RtsRpg
             {
                 if (guideSearch == null && !BeginConnectivityCheck())
                 {
+                    if (units.Exists(entry => entry.Unit.IsRecoveringRevision))
+                    {
+                        targetReport = "Waiting for a valid anchor after the terrain change.";
+                        return;
+                    }
                     RejectTarget(guideTarget, NavigationStatus.InvalidStart);
                     CancelGuide();
                     return;
@@ -905,7 +927,8 @@ namespace GameDev.RtsRpg
             var max = Vector2Int.zero;
             foreach (var entry in units)
             {
-                var pose = new NavigationPose(entry.Unit.Pose.Cell);
+                if (!entry.Unit.HasPlanningAnchor) continue;
+                var pose = new NavigationPose(entry.Unit.PlanningPose.Cell);
                 if (!Grid.CanOccupy(pose, small)) continue;
                 anchors.Add(Grid.StateId(pose));
                 min = Vector2Int.Min(min, pose.Cell);

@@ -46,6 +46,12 @@ namespace GameDev.RtsRpg
         {
             units.Remove(unit);
             Unregister(unit);
+            foreach (var state in lanes.Values)
+            {
+                state.Waiting.Remove(unit);
+                for (int i = state.Inside.Count - 1; i >= 0; i--)
+                    if (state.Inside[i].Unit == unit) state.Inside.RemoveAt(i);
+            }
         }
 
         private void FixedUpdate()
