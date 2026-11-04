@@ -122,7 +122,7 @@ namespace GameDev.RtsRpg
             var vertices = new List<Vector3>();
             var edgeMask = new List<Vector2>();
             var rampJoinVertices = new List<int>();
-            byte[] upperEdges = CollectUpperEdges(surface);
+            byte[] cliffEdges = CollectCliffEdges(surface);
             var nearby = new List<Vector4>(12);
             var landings = new List<Vector4>(4);
             var triangles = new[] { new List<int>(), new List<int>(), new List<int>() };
@@ -138,7 +138,7 @@ namespace GameDev.RtsRpg
                 landings.Clear();
                 if (!cell.IsRamp)
                 {
-                    CollectNearbyEdges(surface, upperEdges, x, z, cell.Level, nearby);
+                    CollectNearbyEdges(surface, cliffEdges, x, z, cell.Level, nearby);
                     CollectRampLandings(surface, x, z, landings);
                 }
 
@@ -397,7 +397,7 @@ namespace GameDev.RtsRpg
             }
         }
 
-        private static byte[] CollectUpperEdges(TerrainSurface surface)
+        private static byte[] CollectCliffEdges(TerrainSurface surface)
         {
             var edges = new byte[surface.CellsX * surface.CellsZ];
             for (int z = 0; z < surface.CellsZ; z++)
@@ -413,7 +413,7 @@ namespace GameDev.RtsRpg
                     int a = surface.BaseQuarterLevel, b = a;
                     if (surface.Contains(x + step.x, z + step.y))
                         surface.GetEdge(x + step.x, z + step.y, TerrainSurface.Opposite(side), out a, out b);
-                    if (a < height || b < height)
+                    if (a != height || b != height)
                         edges[x + z * surface.CellsX] |= (byte)(1 << i);
                 }
             }
@@ -423,7 +423,7 @@ namespace GameDev.RtsRpg
         private static void CollectNearbyEdges(TerrainSurface surface, byte[] edges, int x, int z,
             int level, List<Vector4> nearby)
         {
-            // The transition reaches zero before one cell. Only same-height upper edges
+            // The transition reaches zero before one cell. Only edges from cells at the same height
             // can contribute, including edges ending at a diagonal corner of this cell.
             for (int dz = -1; dz <= 1; dz++)
             for (int dx = -1; dx <= 1; dx++)
