@@ -148,11 +148,17 @@ namespace GameDev.RtsRpg
             private readonly int radius, revision;
             private readonly bool[] visited;
             private int cursor, boundaryCursor;
+            private TargetFlood previous, field;
+            internal bool JoinsPrevious { get; private set; }
+            internal bool JoinsField { get; private set; }
             internal List<Vector2Int> Cells { get; } = new();
             internal List<Vector2Int> EntryCells { get; } = new();
 
-            internal TargetFlood(NavigationGrid grid, Vector2Int target, int radius)
+            internal TargetFlood(NavigationGrid grid, Vector2Int target, int radius,
+                TargetFlood previous = null, TargetFlood field = null)
             {
+                this.previous = previous;
+                this.field = field;
                 this.grid = grid;
                 this.target = target;
                 this.radius = radius;
@@ -169,17 +175,25 @@ namespace GameDev.RtsRpg
 
             internal int Radius => radius;
 
-            internal bool Contains(Vector2Int cell) => Math.Abs(cell.x - target.x) <= radius
+            internal bool Contains(Vector2Int cell) => grid.IsAlive && revision == grid.Revision && Math.Abs(cell.x - target.x) <= radius
                 && Math.Abs(cell.y - target.y) <= radius && visited[Index(cell)];
 
             internal bool Advance(NavigationBudget budget)
             {
                 using var marker = Marker.Auto();
-                if (!grid.IsAlive || revision != grid.Revision) { Cells.Clear(); EntryCells.Clear(); return true; }
+                if (!grid.IsAlive || revision != grid.Revision)
+                {
+                    Cells.Clear();
+                    EntryCells.Clear();
+                    previous = field = null;
+                    return true;
+                }
                 while (cursor < Cells.Count)
                 {
                     if (!budget.Take()) return false;
                     var pose = new NavigationPose(Cells[cursor++]);
+                    if (!JoinsPrevious && previous != null) JoinsPrevious = previous.Contains(pose.Cell);
+                    if (!JoinsField && field != null) JoinsField = field.Contains(pose.Cell);
                     int mask = grid.Edges(pose, Single);
                     for (int i = 0; i < 8; i += 2)
                     {
@@ -204,6 +218,7 @@ namespace GameDev.RtsRpg
                         break;
                     }
                 }
+                previous = field = null;
                 return true;
             }
         }

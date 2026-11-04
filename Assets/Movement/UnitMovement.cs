@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Unity.Profiling;
 using UnityEngine;
@@ -22,8 +23,19 @@ namespace GameDev.RtsRpg
         private float cellSize, height, exitSpeed;
         private Quaternion terrainYaw;
         private int next, edgeIndex, pendingIndex, revision, detourSide;
-        private bool activeEdge, retreating, provisional, pendingProvisional, localStep, finishingMountedStep;
-        private RectInt passage, previousPassage;
+        private bool activeEdge, retreating, provisional, pendingProvisional, localStep, finishingMountedStep, endProvisionalAfterEdge;
+        private NavigationGrid.Passage passage, previousPassage;
+        private Vector2Int passageMouth;
+        private Vector2 steeringPoint;
+        private readonly List<Vector2> edgeTrail = new(32);
+        private float travelHeading, steeringHeading, formationLane, formationWidth = 1f;
+        private bool hasTravelHeading, steeringReady, passagePending;
+        private Hold steeringHold;
+        private NavigationPose failedCorner, failedDirection;
+        private bool leaveCornerAfterEdge;
+        private int cornerRevision, cornerFailures;
+        private static readonly float[] SteeringAngles = { 0f, 18f, -18f, 36f, -36f, 62f, -62f };
+        private static readonly float[] SteeringSpeeds = { 1f, 0.65f, 0.32f };
         private int passageDirection, previousPassageDirection, passageWidth, passageSince;
         internal Vector2Int Bucket { get; set; }
         public Motion State { get; private set; }
@@ -35,12 +47,15 @@ namespace GameDev.RtsRpg
             : activeEdge && progress > 0f && !retreating ? edgeEnd : restingPose;
         internal bool AtAnchor => progress == 0f && !yieldTarget.HasValue && !retreating;
         internal bool HasRoute => (path != null && path.IsCurrent) || (pending != null && pending.IsCurrent);
+        internal bool RequiresCornerRecovery => cornerFailures > 0 && cornerRevision == grid.Revision
+            && (restingPose.Cell - failedCorner.Cell).sqrMagnitude <= 4;
         internal bool CanLaunch => AtAnchor && !HasRoute && Time.time >= yieldUntil;
         internal Rect Occupancy { get; private set; }
         internal Vector2 PredictionVelocity { get; private set; }
         internal bool Planning { get; set; }
         internal int Team { get; private set; }
-        internal RectInt Passage => passage;
+        internal NavigationGrid.Passage Passage => passage;
+        internal Vector2Int PassageMouth => passageMouth;
         internal int PassageDirection => passageDirection;
         internal int PassageWidth => passageWidth;
         internal int PassageSince => passageSince;
@@ -48,8 +63,12 @@ namespace GameDev.RtsRpg
         internal int TurnCount { get; private set; }
         internal int StopCount { get; private set; }
 
+        internal bool ReservesPassage(NavigationGrid.Passage zone) => zone.Overlaps(Occupancy)
+            || (activeEdge && progress > 0f && zone.Overlaps(BoundsAt(edgeStart, edgeYaw)));
+
         internal bool Reserves(Rect area) => Overlaps(Occupancy, area)
-            || (activeEdge && progress > 0f && Overlaps(EdgeSweep(edgeStart, Centre(edgeEnd)), area));
+            || (activeEdge && progress > 0f && (Overlaps(EdgeSweep(edgeStart, Centre(edgeEnd)), area)
+                || Overlaps(EdgeSweep(centre, Centre(edgeEnd)), area)));
 
         public bool Begin(TerrainNavigation owner, NavigationPath route, NavigationFootprint size, int faction = 0)
         {
@@ -133,8 +152,30 @@ namespace GameDev.RtsRpg
             next = index;
             wait = 0f;
             provisional = preview;
+            endProvisionalAfterEdge = false;
             Status = route.Status;
             State = Motion.Moving;
+        }
+
+        internal bool GetReusableRoute(NavigationPose from, out NavigationPath route, out int index)
+        {
+            route = path;
+            index = 0;
+            if (route == null || !route.IsCurrent) return false;
+            for (int i = Mathf.Max(0, next - 1); i < route.Points.Count && i <= next + LookAhead; i++)
+            {
+                if (!route.Points[i].Pose.Equals(from)) continue;
+                index = i;
+                return true;
+            }
+            return false;
+        }
+
+        internal void EndProvisionalRoute()
+        {
+            if (!provisional) return;
+            if (activeEdge && progress > 0f) endProvisionalAfterEdge = true;
+            else StopAtAnchor();
         }
 
         internal void CancelPending() => pending = null;
@@ -158,6 +199,10 @@ namespace GameDev.RtsRpg
             progress = speed = wait = yieldUntil = 0f;
             velocity = PredictionVelocity = Vector2.zero;
             passageDirection = previousPassageDirection = 0;
+            passage = previousPassage = null;
+            hasTravelHeading = false;
+            formationWidth = 1f;
+            cornerFailures = 0;
             State = Motion.Invalidated;
         }
 
@@ -169,7 +214,11 @@ namespace GameDev.RtsRpg
             previousPassage = passage;
             previousPassageDirection = passageDirection;
             passageDirection = 0;
+            passage = null;
+            passagePending = false;
         }
+
+        internal void ConfigureFormation(float lane) => formationLane = Mathf.Clamp(lane, -1f, 1f);
 
         internal void PrepareTick(int tick)
         {
@@ -180,8 +229,14 @@ namespace GameDev.RtsRpg
                 if (activeEdge && progress > 0f && !EdgeStillClear())
                 {
                     Status = NavigationStatus.Stale;
-                    State = Motion.Invalidated;
-                    return;
+                    if (edgeAngle == 0f && edgeTrail.Count != 0)
+                    {
+                        if (edgeTrail.Count > 1 && (centre - edgeTrail[edgeTrail.Count - 1]).sqrMagnitude < 0.00000001f)
+                            edgeTrail.RemoveAt(edgeTrail.Count - 1);
+                        if (grid.CanSweep(centre, edgeTrail[edgeTrail.Count - 1], HalfExtent(facing))) retreating = true;
+                        else { State = Motion.Invalidated; return; }
+                    }
+                    else { State = Motion.Invalidated; return; }
                 }
                 revision = grid.Revision;
                 if (!activeEdge || progress == 0f) StopAtAnchor();
@@ -215,14 +270,122 @@ namespace GameDev.RtsRpg
                 nextDetour = Time.fixedTime + 0.10f;
                 TryDetour(edgeEnd);
             }
-            if (!activeEdge || retreating || !grid.TryPassage(restingPose, edgeEnd, Footprint,
-                out passage, out passageDirection, out passageWidth))
+            if (!activeEdge || retreating || !grid.PassageAt(restingPose, edgeEnd, Footprint,
+                out passageMouth, out passageDirection, out passageWidth)) return;
+            passage = grid.RequestPassage(passageMouth);
+            passagePending = passage == null || !passage.Ready;
+            if (previousPassageDirection != passageDirection || !ReferenceEquals(previousPassage, passage)) passageSince = tick;
+        }
+
+        internal void PrepareSteering(float dt)
+        {
+            steeringReady = false;
+            steeringHold = Hold.None;
+            if (!activeEdge || edgeAngle != 0f || !CurrentGrid || revision != grid.Revision || passagePending) return;
+            Vector2 end = retreating && edgeTrail.Count != 0 ? edgeTrail[edgeTrail.Count - 1] : Centre(edgeEnd);
+            Vector2 toEnd = end - centre;
+            float remaining = toEnd.magnitude;
+            if (remaining <= 0.0001f)
             {
-                passageDirection = 0;
+                steeringPoint = end;
+                steeringHeading = travelHeading;
+                steeringReady = true;
                 return;
             }
-            if (previousPassageDirection != passageDirection || !previousPassage.Equals(passage)) passageSince = tick;
+
+            Vector2 direct = toEnd / remaining;
+            Vector2 half = HalfExtent(facing);
+            float maxSpeed = 4f / cellSize;
+            float acceleration = 12f / cellSize;
+            float finalSpeed = retreating ? 0f : exitSpeed;
+            float limit = Mathf.Min(maxSpeed, Mathf.Sqrt(finalSpeed * finalSpeed + 2f * acceleration * remaining));
+            float targetSpeed = Mathf.Min(0.25f / dt, Mathf.MoveTowards(speed, limit, acceleration * dt));
+            const float horizon = 0.28f;
+            navigation.CollectSteeringNeighbors(this, centre, 4f + Mathf.Min(4f, maxSpeed * horizon));
+
+            bool steerLaterally = !Footprint.NeedsTurns && passage == null && !localStep && !retreating
+                && !grid.PassageAt(restingPose, restingPose, Footprint, out _, out _, out _)
+                && !grid.IsRampPose(restingPose, Footprint) && !grid.IsRampPose(edgeEnd, Footprint);
+            Vector2 desired = direct;
+            if (steerLaterally && formationLane != 0f)
+            {
+                float clear = Mathf.Min(grid.FormationClearance(restingPose, Footprint, direct),
+                    grid.FormationClearance(edgeEnd, Footprint, direct));
+                if (path != null && edgeIndex + 1 < path.Points.Count)
+                    clear = Mathf.Min(clear, grid.FormationClearance(path.Points[edgeIndex + 1].Pose, Footprint, direct));
+                formationWidth = Mathf.MoveTowards(formationWidth, clear, dt * 2f);
+                var across = new Vector2(-direct.y, direct.x);
+                Vector2 onEdge = Vector2.Lerp(edgeStart, end, progress);
+                float lateralError = formationLane * formationWidth * 0.55f - Vector2.Dot(centre - onEdge, across);
+                desired = (direct + across * (lateralError * Mathf.Clamp01((remaining - 0.45f) / 1.2f))).normalized;
+            }
+            else formationWidth = Mathf.MoveTowards(formationWidth, 0f, dt * 4f);
+
+            float desiredAngle = Heading(desired);
+            float initialHeading = hasTravelHeading && !Footprint.NeedsTurns ? travelHeading : Heading(direct);
+            float best = float.NegativeInfinity;
+            bool geometricallyClear = false;
+            steeringHeading = Mathf.MoveTowardsAngle(initialHeading, desiredAngle, 420f * dt);
+            Rect body = BoundsAt(centre, facing);
+            // Close to the checked anchor, take the exact remaining step so
+            // handoff, occupancy and path completion all share the same pose.
+            if (remaining <= targetSpeed * dt && grid.CanSweep(centre, end, half)
+                && (!hasTravelHeading || Footprint.NeedsTurns || Mathf.Abs(Mathf.DeltaAngle(initialHeading, Heading(direct))) <= 420f * dt))
+            {
+                Vector2 snapVelocity = toEnd / dt;
+                if (navigation.TimeToContact(body, snapVelocity, dt) >= dt
+                    && (retreating || grid.CanSteerAcrossPassage(TranslationSweep(centre, end, facing), body, passage)))
+                {
+                    steeringPoint = end;
+                    steeringHeading = Heading(direct);
+                    steeringReady = true;
+                    return;
+                }
+            }
+
+            int angles = steerLaterally ? SteeringAngles.Length : 1;
+            for (int i = 0; i < angles; i++)
+            {
+                float angle = Footprint.NeedsTurns ? Heading(direct)
+                    : Mathf.MoveTowardsAngle(initialHeading, desiredAngle + SteeringAngles[i], 420f * dt);
+                float radians = angle * Mathf.Deg2Rad;
+                Vector2 direction = new Vector2(Mathf.Sin(radians), Mathf.Cos(radians));
+                float forward = Vector2.Dot(direct, direction);
+                if (forward < 0.05f) continue;
+                for (int j = 0; j < SteeringSpeeds.Length; j++)
+                {
+                    float candidateSpeed = Mathf.Min(0.25f / dt,
+                        Mathf.MoveTowards(speed, limit * SteeringSpeeds[j], acceleration * dt));
+                    float amount = Mathf.Min(remaining, candidateSpeed * dt);
+                    if (amount <= 0.000001f) continue;
+                    Vector2 point = centre + direction * amount;
+                    if (!grid.CanSweep(centre, point, half) || (!retreating
+                        && !grid.CanSteerAcrossPassage(TranslationSweep(centre, point, facing), body, passage))) continue;
+                    geometricallyClear = true;
+                    float safe = navigation.TimeToContact(body, (point - centre) / dt, horizon);
+                    if (safe <= dt) continue;
+                    // Reward progress, clearance and the previously selected
+                    // side. A slower candidate can beat a fast collision course.
+                    float side = direct.x * direction.y - direct.y * direction.x;
+                    float score = forward * SteeringSpeeds[j] + safe / horizon * 1.5f
+                        + Vector2.Dot(desired, direction) * 0.22f
+                        + (detourSide != 0 && side * detourSide > 0.05f ? 0.12f : 0f);
+                    if (score <= best) continue;
+                    best = score;
+                    steeringPoint = point;
+                    steeringHeading = angle;
+                    steeringReady = true;
+                    if (i == 0 && j == 0 && safe >= horizon) return;
+                }
+            }
+            if (!steeringReady)
+            {
+                bool aligning = !Footprint.NeedsTurns && Mathf.Abs(Mathf.DeltaAngle(initialHeading, Heading(direct))) > 420f * dt;
+                steeringHold = geometricallyClear ? Hold.Traffic : aligning ? Hold.None : Hold.Geometry;
+            }
         }
+
+        private static float Heading(Vector2 direction) => Mathf.Atan2(direction.x, direction.y) * Mathf.Rad2Deg;
 
         internal void MoveTick(float dt)
         {
@@ -250,49 +413,103 @@ namespace GameDev.RtsRpg
             }
 
             Vector2 end = Centre(edgeEnd);
-            float distance = (end - edgeStart).magnitude;
-            float length = Mathf.Max(distance, Mathf.Abs(edgeAngle) / 55f);
-            length = Mathf.Max(length, 0.01f);
-            float remaining = length * (retreating ? progress : 1f - progress);
-            float maxSpeed = 4f / cellSize;
-            float acceleration = 12f / cellSize;
-            float endSpeed = retreating ? 0f : exitSpeed;
-            float targetSpeed = Mathf.Min(maxSpeed, Mathf.Sqrt(endSpeed * endSpeed + 2f * acceleration * remaining));
-            speed = Mathf.MoveTowards(speed, targetSpeed, acceleration * dt);
-            float increment = Mathf.Min(0.25f, Mathf.Max(speed * dt, Mathf.Min(remaining, 0.0001f)));
-            float proposedProgress = Mathf.MoveTowards(progress, retreating ? 0f : 1f, increment / length);
-            Vector2 proposed = Vector2.Lerp(edgeStart, end, proposedProgress);
-            float proposedYaw = edgeYaw + edgeAngle * proposedProgress;
-            Rect sweep = edgeAngle == 0f ? Union(BoundsAt(centre, facing), BoundsAt(proposed, proposedYaw)) : EdgeSweep(edgeStart, end);
-            if (!retreating && passageDirection != 0 && !navigation.CanEnterPassage(this))
+            if (!retreating && (passagePending || (passage != null && !navigation.CanEnterPassage(this))))
             {
                 Wait(Hold.Passage, dt);
                 return;
             }
+
+            Vector2 proposed;
+            float proposedProgress, proposedYaw;
+            if (edgeAngle == 0f)
+            {
+                travelHeading = steeringHeading;
+                hasTravelHeading = true;
+                if (!steeringReady)
+                {
+                    if (steeringHold == Hold.None) { speed = 0f; return; }
+                    Wait(steeringHold, dt);
+                    if (steeringHold == Hold.Traffic && wait >= 0.15f && !retreating)
+                        Blocker(TranslationSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), facing))
+                            ?.YieldForFriendly(end - centre, this);
+                    if (wait >= 0.85f && !retreating) RecoverBlockedEdge();
+                    else if (retreating && wait >= 1.7f && grid.CanSweep(centre, end, HalfExtent(facing))
+                        && Blocker(TranslationSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), facing)) == null)
+                        retreating = false;
+                    return;
+                }
+                proposed = steeringPoint;
+                proposedYaw = facing;
+                bool reachedBreadcrumb = retreating && edgeTrail.Count != 0
+                    && (proposed - edgeTrail[edgeTrail.Count - 1]).sqrMagnitude < 0.00000001f;
+                if (reachedBreadcrumb)
+                    proposedProgress = edgeTrail.Count == 1 ? 0f : Mathf.Max(0.0001f, progress);
+                else if (!retreating && (proposed - end).sqrMagnitude < 0.00000001f)
+                    proposedProgress = 1f;
+                else
+                {
+                    var edge = end - edgeStart;
+                    proposedProgress = Mathf.Clamp(Vector2.Dot(proposed - edgeStart, edge) / edge.sqrMagnitude, 0.0001f, 0.9999f);
+                }
+            }
+            else
+            {
+                float length = Mathf.Max((end - edgeStart).magnitude, Mathf.Abs(edgeAngle) / 55f);
+                float remaining = length * (retreating ? progress : 1f - progress);
+                float acceleration = 12f / cellSize;
+                float targetSpeed = Mathf.Min(4f / cellSize, Mathf.Sqrt(2f * acceleration * remaining));
+                speed = Mathf.MoveTowards(speed, targetSpeed, acceleration * dt);
+                float increment = Mathf.Min(0.25f, Mathf.Max(speed * dt, Mathf.Min(remaining, 0.0001f)));
+                proposedProgress = Mathf.MoveTowards(progress, retreating ? 0f : 1f, increment / length);
+                proposed = Vector2.Lerp(edgeStart, end, proposedProgress);
+                proposedYaw = edgeYaw + edgeAngle * proposedProgress;
+            }
+
+            Rect sweep = edgeAngle == 0f ? TranslationSweep(centre, proposed, facing) : EdgeSweep(edgeStart, end);
             var obstruction = Blocker(sweep);
             if (obstruction != null)
             {
                 if (obstruction.Team == Team && wait >= 0.15f && !retreating)
-                    obstruction.TryYield(end - centre, this);
+                    obstruction.YieldForFriendly(end - centre, this);
                 Wait(Hold.Traffic, dt);
                 if (wait >= 0.85f && !retreating)
                 {
-                    if (progress == 0f) StopAtAnchor();
-                    else retreating = true;
+                    RecoverBlockedEdge();
                 }
                 else if (retreating && wait >= 1.7f && Blocker(EdgeSweep(centre, end)) == null)
                     retreating = false;
                 return;
             }
 
-            if (passageDirection != 0 && !retreating) navigation.EnterPassage(this);
+            if (passage != null && !retreating) navigation.EnterPassage(this);
             if (progress == 0f && edgeAngle != 0f) TurnCount++;
             velocity = (proposed - centre) / dt;
+            if (edgeAngle == 0f) speed = velocity.magnitude;
             if (velocity.sqrMagnitude > 0.000001f) MotionTicks++;
+            if (edgeAngle == 0f)
+            {
+                if (retreating)
+                {
+                    if (edgeTrail.Count > 1 && (proposed - edgeTrail[edgeTrail.Count - 1]).sqrMagnitude < 0.00000001f)
+                        edgeTrail.RemoveAt(edgeTrail.Count - 1);
+                }
+                else if (edgeTrail.Count != 0)
+                {
+                    var last = edgeTrail[edgeTrail.Count - 1];
+                    if (!grid.CanSweep(last, proposed, HalfExtent(facing))) edgeTrail.Add(centre);
+                    else if ((proposed - last).sqrMagnitude >= 0.04f) edgeTrail.Add(proposed);
+                }
+            }
             centre = proposed;
             facing = proposedYaw;
             progress = proposedProgress;
             wait = 0f;
+            if (edgeAngle == 0f)
+            {
+                var direction = (end - edgeStart).normalized;
+                float side = direction.x * velocity.y - direction.y * velocity.x;
+                if (Mathf.Abs(side) > 0.15f) detourSide = Math.Sign(side);
+            }
             HoldReason = Hold.None;
             State = retreating ? Motion.RepathPending : localStep ? Motion.Yielding : Motion.Moving;
             Rect occupancy = edgeAngle != 0f && progress < 1f && !(retreating && progress <= 0f)
@@ -302,6 +519,35 @@ namespace GameDev.RtsRpg
             navigation.Register(this, centre);
             if (retreating && progress <= 0f) StopAtAnchor();
             else if (progress >= 1f) FinishEdge();
+        }
+
+        private void RecoverBlockedEdge()
+        {
+            if (HoldReason == Hold.Geometry) RecordCornerFailure(edgeEnd);
+            if (progress == 0f)
+            {
+                if (HoldReason == Hold.Geometry && TryDetour(edgeEnd, true)) return;
+                StopAtAnchor();
+            }
+            else
+            {
+                retreating = true;
+                if (edgeAngle == 0f && edgeTrail.Count > 1 && (centre - edgeTrail[edgeTrail.Count - 1]).sqrMagnitude < 0.00000001f)
+                    edgeTrail.RemoveAt(edgeTrail.Count - 1);
+            }
+        }
+
+        private void RecordCornerFailure(NavigationPose destination)
+        {
+            if (cornerRevision == grid.Revision && failedCorner.Equals(restingPose) && failedDirection.Equals(destination))
+                cornerFailures++;
+            else
+            {
+                cornerRevision = grid.Revision;
+                failedCorner = restingPose;
+                failedDirection = destination;
+                cornerFailures = 1;
+            }
         }
 
         private void Wait(Hold reason, float dt)
@@ -317,6 +563,7 @@ namespace GameDev.RtsRpg
         {
             var destination = path.Points[next].Pose;
             int index = next;
+            int staging = RampStagingIndex();
             if (destination.Facing != restingPose.Facing)
             {
                 // Join successive 45-degree graph turns into one continuous pivot
@@ -335,7 +582,7 @@ namespace GameDev.RtsRpg
             }
             else if (!grid.NearBoundary(restingPose, Footprint))
             {
-                for (int i = next + 1; i < path.Points.Count && i <= next + LookAhead; i++)
+                for (int i = next + 1; i < path.Points.Count && i <= next + LookAhead && i <= staging; i++)
                 {
                     var candidate = path.Points[i].Pose;
                     if (grid.NearBoundary(candidate, Footprint) || !CanShortcut(restingPose, candidate, 3f)) break;
@@ -352,19 +599,34 @@ namespace GameDev.RtsRpg
             if (!turning && !grid.CanSweep(centre, Centre(destination), HalfExtent(facing)))
             {
                 HoldReason = Hold.Geometry;
-                StopAtAnchor();
+                RecordCornerFailure(destination);
+                if (!TryDetour(destination, true)) StopAtAnchor();
                 return;
             }
             SetEdge(destination, index, false);
         }
 
-        private bool TryDetour(NavigationPose destination)
+        private int RampStagingIndex()
+        {
+            if (grid.IsRampPose(restingPose, Footprint)) return next;
+            int end = Mathf.Min(path.Points.Count - 1, next + LookAhead);
+            for (int i = next; i <= end; i++)
+            {
+                var point = path.Points[i].Pose;
+                if (!grid.IsRampPose(point, Footprint)) continue;
+                // Keep the last flat aligned pose as a checked checkpoint.
+                // The ramp edge can then carry speed through the entry.
+                return Mathf.Max(next, i - 1);
+            }
+            return end;
+        }
+
+        private bool TryDetour(NavigationPose destination, bool cornerRecovery = false)
         {
             if (yieldTarget.HasValue || path == null) return false;
             // Leave actual single lanes to passage arbitration. A detour is
             // useful only if there is a verified way back to the route ahead.
-            if (grid.TryPassage(restingPose, destination, Footprint, out var lane, out int axis, out int bodyWidth)
-                && (Mathf.Abs(axis) == 1 ? lane.height : lane.width) < bodyWidth * 2) return false;
+            if (!cornerRecovery && passage != null && (passage.Complex || passage.Width < passageWidth * 2)) return false;
             if (Footprint.NeedsTurns) return TryMountedDetour();
             var desired = Centre(destination) - centre;
             if (desired.sqrMagnitude < 0.01f) return false;
@@ -378,8 +640,8 @@ namespace GameDev.RtsRpg
                 if ((mask & (1 << i)) == 0) continue;
                 var delta = NavigationPose.Steps[i];
                 var option = new NavigationPose(restingPose.Cell + delta, restingPose.Facing);
-                if (option.Equals(destination) || Vector2.Dot(desired, delta) < 0f
-                    || grid.TryPassage(restingPose, option, Footprint, out _, out _, out _)
+                if (option.Equals(destination) || (!cornerRecovery && Vector2.Dot(desired, delta) < 0f)
+                    || (!cornerRecovery && grid.PassageAt(restingPose, option, Footprint, out _, out _, out _))
                     || navigation.FindContact(this, TranslationSweep(centre, Centre(option), facing), horizon: 0.24f) != null) continue;
                 for (int j = Mathf.Min(path.Points.Count - 1, next + LookAhead); j >= next; j--)
                 {
@@ -389,6 +651,7 @@ namespace GameDev.RtsRpg
                     int optionSide = desired.x * delta.y - desired.y * delta.x >= 0f ? 1 : -1;
                     float score = j + Vector2.Dot(desired.normalized, ((Vector2)delta).normalized)
                         + (optionSide == detourSide ? 1.5f : 0f) - (grid.NearBoundary(option, Footprint) ? 1f : 0f);
+                    if (cornerRecovery && !grid.NearBoundary(option, Footprint)) score += 2f;
                     if (score > best)
                     {
                         best = score;
@@ -399,9 +662,38 @@ namespace GameDev.RtsRpg
                     break;
                 }
             }
-            if (side == 0) return false;
+            if (side == 0) return cornerRecovery && TryLeaveCorner(desired);
             detourSide = side;
             SetEdge(chosen, rejoin, true);
+            return true;
+        }
+
+        private bool TryLeaveCorner(Vector2 desired)
+        {
+            if (Footprint.NeedsTurns) return TryMountedDetour();
+            float best = float.NegativeInfinity;
+            NavigationPose chosen = default;
+            int edges = grid.Edges(restingPose, Footprint);
+            for (int i = 0; i < 8; i++)
+            {
+                if ((edges & (1 << i)) == 0) continue;
+                var step = NavigationPose.Steps[i];
+                var candidate = new NavigationPose(restingPose.Cell + step, restingPose.Facing);
+                if (candidate.Equals(failedDirection) || grid.PassageAt(restingPose, candidate, Footprint, out _, out _, out _)
+                    || Blocker(TranslationSweep(centre, Centre(candidate), facing)) != null) continue;
+                bool inside = !grid.NearBoundary(candidate, Footprint);
+                float forward = Vector2.Dot(desired.normalized, ((Vector2)step).normalized);
+                // On the edge, follow the boundary. A step away from the
+                // goal is only useful when it takes the body back inland.
+                if (!inside && (forward < -0.05f || cornerFailures > 1)) continue;
+                float score = (inside ? 3f : 0f) + forward;
+                if (score <= best) continue;
+                chosen = candidate;
+                best = score;
+            }
+            if (float.IsNegativeInfinity(best)) return false;
+            SetEdge(chosen, next, true);
+            leaveCornerAfterEdge = true;
             return true;
         }
 
@@ -432,11 +724,13 @@ namespace GameDev.RtsRpg
         {
             edgeEnd = to;
             edgeStart = centre;
+            edgeTrail.Clear();
+            edgeTrail.Add(centre);
             edgeYaw = facing;
             edgeAngle = Mathf.DeltaAngle(facing, to.Yaw);
             edgeIndex = index;
             localStep = local;
-            finishingMountedStep = false;
+            finishingMountedStep = leaveCornerAfterEdge = false;
             exitSpeed = 0f;
             if (!local && path != null && index + 1 < path.Points.Count && edgeAngle == 0f)
             {
@@ -456,7 +750,7 @@ namespace GameDev.RtsRpg
             restingPose = edgeEnd;
             activeEdge = false;
             progress = 0f;
-            if (finishingMountedStep)
+            if (finishingMountedStep || leaveCornerAfterEdge)
             {
                 StopAtAnchor();
                 yieldUntil = Time.time + 0.18f;
@@ -469,13 +763,14 @@ namespace GameDev.RtsRpg
                 return;
             }
             next = localStep ? edgeIndex : edgeIndex + 1;
+            if (endProvisionalAfterEdge) StopAtAnchor();
             if (!localStep) detourSide = 0;
             if (path != null && !path.IsCurrent) StopAtAnchor();
         }
 
         private void StopAtAnchor()
         {
-            activeEdge = retreating = finishingMountedStep = false;
+            activeEdge = retreating = finishingMountedStep = endProvisionalAfterEdge = leaveCornerAfterEdge = false;
             progress = speed = wait = 0f;
             path = null;
             yieldTarget = mountedStep = null;
@@ -506,7 +801,7 @@ namespace GameDev.RtsRpg
                     bool visited = false;
                     for (int j = 0; j < points.Count; j++) visited |= points[j].Pose.Equals(option);
                     if (visited) continue;
-                    if (!turn && grid.TryPassage(from, option, Footprint, out _, out _, out _)) continue;
+                    if (!turn && grid.PassageAt(from, option, Footprint, out _, out _, out _)) continue;
                     if (!turn && Vector2.Dot(desired, Centre(option) - Centre(from)) < 0f) continue;
                     if (turn && Mathf.Abs(Mathf.DeltaAngle(option.Yaw, angle)) >= Mathf.Abs(Mathf.DeltaAngle(from.Yaw, angle))) continue;
                     Rect sweep = turn ? TurnSweep(Centre(from), Centre(option)) : TranslationSweep(Centre(from), Centre(option), from.Yaw);
@@ -529,9 +824,9 @@ namespace GameDev.RtsRpg
         internal bool CanPlan => !retreating && Time.time >= yieldUntil;
         internal bool Recovering => State == Motion.RepathPending || State == Motion.Blocked || State == Motion.Waiting;
 
-        private void TryYield(Vector2 approach, UnitMovement requester)
+        private void YieldForFriendly(Vector2 approach, UnitMovement requester)
         {
-            if (!AtAnchor || grid.Revision != revision || Time.time < yieldUntil || (HasRoute && !Recovering)) return;
+            if (requester.Team != Team || !AtAnchor || grid.Revision != revision || Time.time < yieldUntil || (HasRoute && !Recovering)) return;
             Vector2Int forward = Mathf.Abs(approach.x) >= Mathf.Abs(approach.y)
                 ? Vector2Int.right * (approach.x >= 0 ? 1 : -1)
                 : Vector2Int.up * (approach.y >= 0 ? 1 : -1);
@@ -561,6 +856,8 @@ namespace GameDev.RtsRpg
 
         internal bool AllowsSearchEdge(NavigationPose from, NavigationPose to, bool avoidAllies)
         {
+            if (cornerFailures >= 2 && cornerRevision == grid.Revision && from.Equals(failedCorner)
+                && to.Equals(failedDirection)) return false;
             Rect sweep = from.Facing != to.Facing ? TurnSweep(Centre(from), Centre(to))
                 : TranslationSweep(Centre(from), Centre(to), from.Yaw);
             return navigation.FindContact(this, sweep, search: true, avoidAllies: avoidAllies) == null;
@@ -572,12 +869,15 @@ namespace GameDev.RtsRpg
         private bool CurrentGrid => navigation != null && grid == navigation.Grid && grid.IsAlive;
         private Vector2 Centre(NavigationPose pose) => pose.Centre(Footprint);
         private Vector2 TurnHalfExtent => Vector2.one * 1.118034f;
-        private bool EdgeStillClear() => grid.CanSweep(edgeStart, Centre(edgeEnd), edgeAngle == 0f ? HalfExtent(edgeYaw) : TurnHalfExtent);
+        private bool EdgeStillClear() => edgeAngle == 0f
+            ? grid.CanSweep(centre, Centre(edgeEnd), HalfExtent(facing))
+            : grid.CanSweep(edgeStart, Centre(edgeEnd), TurnHalfExtent);
         private UnitMovement Blocker(Rect sweep) => navigation.FindContact(this, sweep);
 
         private bool CanShortcut(NavigationPose from, NavigationPose to, float maxDistance)
         {
-            if (from.Facing != to.Facing) return false;
+            if (from.Facing != to.Facing || (RequiresCornerRecovery && from.Equals(failedCorner)
+                && to.Equals(failedDirection))) return false;
             var delta = to.Cell - from.Cell;
             if (delta == Vector2Int.zero || ((Vector2)delta).sqrMagnitude > maxDistance * maxDistance) return false;
             if (Footprint.NeedsTurns)
@@ -595,7 +895,8 @@ namespace GameDev.RtsRpg
                     Vector2 point = Vector2.Lerp(a, b, (float)i / steps);
                     var anchor = point - (Vector2)Footprint.Size(from.Facing) * 0.5f;
                     var pose = new NavigationPose(new Vector2Int(Mathf.RoundToInt(anchor.x), Mathf.RoundToInt(anchor.y)), from.Facing);
-                    if (grid.NearBoundary(pose, Footprint)) return false;
+                    if (grid.NearBoundary(pose, Footprint) || grid.IsRampPose(pose, Footprint)
+                        || grid.PassageAt(pose, pose, Footprint, out _, out _, out _)) return false;
                 }
             }
             return grid.CanSweep(a, b, HalfExtent(from.Yaw));

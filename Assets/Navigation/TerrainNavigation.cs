@@ -25,15 +25,15 @@ namespace GameDev.RtsRpg
         private readonly Dictionary<Vector2Int, List<UnitMovement>> traffic = new();
         private readonly Stack<List<UnitMovement>> spareBuckets = new();
         private readonly List<UnitMovement> units = new();
-        private readonly Dictionary<(RectInt Area, bool AlongX), PassageState> lanes = new();
+        private readonly Dictionary<NavigationGrid.Passage, PassageState> lanes = new();
         private readonly Stack<PassageState> freePassages = new();
-        private readonly List<(RectInt Area, bool AlongX)> emptyPassages = new();
+        private readonly List<NavigationGrid.Passage> emptyPassages = new();
         private int tick, firstUnit, laneRevision;
 
         private sealed class PassageState
         {
             internal readonly List<UnitMovement> Waiting = new();
-            internal readonly List<(UnitMovement Unit, int Direction, int Width)> Inside = new();
+            internal readonly List<(UnitMovement Unit, Vector2Int Mouth, int Direction, int Width)> Inside = new();
         }
 
         internal void Track(UnitMovement unit, Vector2 centre)
@@ -58,15 +58,15 @@ namespace GameDev.RtsRpg
                 ResetPassages();
                 laneRevision = Grid.Revision;
             }
+            Grid.AdvancePassages(192);
             foreach (var pair in lanes)
             {
                 var state = pair.Value;
                 state.Waiting.Clear();
-                var area = ToRect(pair.Key.Area);
                 for (int i = state.Inside.Count - 1; i >= 0; i--)
                 {
                     var unit = state.Inside[i].Unit;
-                    if (unit == null || !unit.isActiveAndEnabled || !UnitMovement.Overlaps(unit.Occupancy, area))
+                    if (unit == null || !unit.isActiveAndEnabled || !unit.ReservesPassage(pair.Key))
                         state.Inside.RemoveAt(i);
                 }
             }
@@ -74,19 +74,20 @@ namespace GameDev.RtsRpg
             foreach (var unit in units)
             {
                 unit.PrepareTick(tick);
-                if (unit.PassageDirection == 0) continue;
-                var key = PassageKey(unit);
+                var key = unit.Passage;
+                if (key == null || !key.Ready) continue;
                 if (!lanes.TryGetValue(key, out var state))
                 {
                     state = freePassages.Count == 0 ? new PassageState() : freePassages.Pop();
                     lanes.Add(key, state);
                 }
-                if (!UnitMovement.Overlaps(unit.Occupancy, ToRect(unit.Passage))) state.Waiting.Add(unit);
+                if (!key.Overlaps(unit.Occupancy)) state.Waiting.Add(unit);
                 else EnterPassage(unit);
             }
 
             // Everyone predicts against the same snapshot. Rotate the order
             // of live collision commits so the first spawned unit cannot dominate.
+            foreach (var unit in units) unit.PrepareSteering(Time.fixedDeltaTime);
             firstUnit = (firstUnit + 1) % units.Count;
             for (int i = 0; i < units.Count; i++) units[(firstUnit + i) % units.Count].MoveTick(Time.fixedDeltaTime);
             emptyPassages.Clear();
@@ -110,37 +111,80 @@ namespace GameDev.RtsRpg
             lanes.Clear();
         }
 
-        private static (RectInt Area, bool AlongX) PassageKey(UnitMovement unit) =>
-            (unit.Passage, Math.Abs(unit.PassageDirection) == 1);
-
-        private static Rect ToRect(RectInt area) => new(area.x, area.y, area.width, area.height);
-
         internal bool CanEnterPassage(UnitMovement unit)
         {
-            if (UnitMovement.Overlaps(unit.Occupancy, ToRect(unit.Passage))) return true;
-            var key = PassageKey(unit);
-            if (!lanes.TryGetValue(key, out var state)) return false;
-            int width = key.AlongX ? key.Area.height : key.Area.width;
-            int direction = unit.PassageDirection;
-            foreach (var inside in state.Inside)
-                if (inside.Direction != direction && inside.Width + unit.PassageWidth > width) return false;
+            var passage = unit.Passage;
+            if (passage == null || !passage.Ready || !lanes.TryGetValue(passage, out var state)) return false;
+            if (passage.Overlaps(unit.Occupancy)) return true;
 
+            foreach (var inside in state.Inside)
+                if (Conflicts(inside.Mouth, inside.Direction, inside.Width)) return false;
             foreach (var other in state.Waiting)
             {
-                if (other == unit || other.PassageDirection == direction || other.PassageWidth + unit.PassageWidth <= width) continue;
-                // Once the opposite side has waited longer, let the current
-                // wave drain. A stable tie-break makes the first grant unique.
+                if (other == unit || !Conflicts(other.PassageMouth, other.PassageDirection, other.PassageWidth)) continue;
                 if (other.PassageSince < unit.PassageSince || (other.PassageSince == unit.PassageSince
                     && other.GetInstanceID() < unit.GetInstanceID())) return false;
             }
             return true;
+
+            bool Conflicts(Vector2Int mouth, int direction, int width)
+            {
+                if (!passage.Complex)
+                    return direction != unit.PassageDirection && width + unit.PassageWidth > passage.Width;
+                if (direction != unit.PassageDirection) return true;
+                var delta = mouth - unit.PassageMouth;
+                return Math.Abs(direction) == 1 ? delta.x != 0 || Math.Abs(delta.y) >= passage.Width
+                    : delta.y != 0 || Math.Abs(delta.x) >= passage.Width;
+            }
         }
 
         internal void EnterPassage(UnitMovement unit)
         {
-            if (!lanes.TryGetValue(PassageKey(unit), out var state)) return;
+            if (unit.Passage == null || !lanes.TryGetValue(unit.Passage, out var state)) return;
             foreach (var inside in state.Inside) if (inside.Unit == unit) return;
-            state.Inside.Add((unit, unit.PassageDirection, unit.PassageWidth));
+            state.Inside.Add((unit, unit.PassageMouth, unit.PassageDirection, unit.PassageWidth));
+        }
+
+        private readonly List<UnitMovement> steeringNeighbors = new();
+
+        internal void CollectSteeringNeighbors(UnitMovement requester, Vector2 centre, float range)
+        {
+            steeringNeighbors.Clear();
+            var min = BucketAt(centre.x - range, centre.y - range);
+            var max = BucketAt(centre.x + range, centre.y + range);
+            for (int z = min.y; z <= max.y; z++)
+            for (int x = min.x; x <= max.x; x++)
+                if (traffic.TryGetValue(new Vector2Int(x, z), out var bucket))
+                    foreach (var other in bucket)
+                        if (other != requester && requester.SharesGrid(other)) steeringNeighbors.Add(other);
+        }
+
+        internal float TimeToContact(Rect body, Vector2 velocity, float horizon)
+        {
+            float earliest = horizon;
+            foreach (var other in steeringNeighbors)
+            {
+                var obstacle = other.Occupancy;
+                var relative = velocity - other.PredictionVelocity;
+                float enter = 0f, leave = earliest;
+                if (Axis(body.xMin, body.xMax, obstacle.xMin, obstacle.xMax, relative.x, ref enter, ref leave)
+                    && Axis(body.yMin, body.yMax, obstacle.yMin, obstacle.yMax, relative.y, ref enter, ref leave))
+                    earliest = enter;
+                if (earliest <= 0f) break;
+            }
+            return earliest;
+
+            static bool Axis(float min, float max, float low, float high, float speed, ref float enter, ref float leave)
+            {
+                const float epsilon = 0.0001f;
+                low += epsilon;
+                high -= epsilon;
+                if (Math.Abs(speed) < epsilon) return min < high && max > low;
+                float a = (low - max) / speed, b = (high - min) / speed;
+                enter = Math.Max(enter, Math.Min(a, b));
+                leave = Math.Min(leave, Math.Max(a, b));
+                return enter < leave;
+            }
         }
 
         private static Vector2Int BucketAt(float x, float z) => new(
