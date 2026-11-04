@@ -42,7 +42,7 @@ Shader "GameDev/Terrain Surface"
                 float4 positionCS : SV_POSITION;
                 float3 positionWS : TEXCOORD0;
                 float3 normalWS : TEXCOORD1;
-                float edgeMask : TEXCOORD2;
+                float2 edgeMask : TEXCOORD2;
             };
             Varyings Vert(Attributes input)
             {
@@ -50,7 +50,7 @@ Shader "GameDev/Terrain Surface"
                 output.positionWS = TransformObjectToWorld(input.positionOS.xyz);
                 output.positionCS = TransformWorldToHClip(output.positionWS);
                 output.normalWS = TransformObjectToWorldNormal(input.normalOS);
-                output.edgeMask = input.edgeMask.x;
+                output.edgeMask = input.edgeMask;
                 return output;
             }
             half3 SampleRock(float3 p, half3 normal)
@@ -70,7 +70,7 @@ Shader "GameDev/Terrain Surface"
                 half3 albedo;
                 if (_SurfaceType == 1)
                 {
-                    albedo = SampleRock(p, normal);
+                    albedo = SampleRock(p, normal) * (1.0 - 0.24 * input.edgeMask.y);
                 }
                 else
                 {
@@ -78,10 +78,15 @@ Shader "GameDev/Terrain Surface"
                     if (_SurfaceType == 0)
                     {
                         half3 earth = SAMPLE_TEXTURE2D(_EarthMap, sampler_EarthMap, p.xz).rgb;
-                        float distance = 1.0 - input.edgeMask;
-                        float irregularity = (earth.r - 0.5) * 0.24;
-                        float grass = smoothstep(_EdgeWidth - 0.09, _EdgeWidth + 0.09, distance + irregularity);
-                        albedo = lerp(earth, albedo, grass);
+                        float distance = 1.0 - input.edgeMask.x;
+                        float2 world = input.positionWS.xz;
+                        float irregularity = 0.085 * sin(dot(world, float2(1.62, 1.17)))
+                                           + 0.045 * sin(dot(world, float2(3.9, -3.1)))
+                                           + (earth.r - 0.3) * 0.10;
+                        float grass = smoothstep(_EdgeWidth - 0.065, _EdgeWidth + 0.065, distance + irregularity);
+                        half3 cliffTop = lerp(earth, albedo, grass);
+                        float landing = smoothstep(0.30, 1.0, input.edgeMask.y);
+                        albedo = lerp(cliffTop, earth * half3(0.78, 0.73, 0.65), landing);
                     }
                 }
 

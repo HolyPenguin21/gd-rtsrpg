@@ -124,6 +124,7 @@ namespace GameDev.RtsRpg
             var rampJoinVertices = new List<int>();
             byte[] upperEdges = CollectUpperEdges(surface);
             var nearby = new List<Vector4>(12);
+            var landings = new List<Vector4>(4);
             var triangles = new[] { new List<int>(), new List<int>(), new List<int>() };
             for (int z = 0; z < surface.CellsZ; z++)
             for (int x = 0; x < surface.CellsX; x++)
@@ -134,21 +135,23 @@ namespace GameDev.RtsRpg
                 Vector3 ne = surface.Position(x + 1, z + 1, cell.Corner(1, 1));
                 Vector3 se = surface.Position(x + 1, z, cell.Corner(1, 0));
                 nearby.Clear();
+                landings.Clear();
                 if (!cell.IsRamp)
+                {
                     CollectNearbyEdges(surface, upperEdges, x, z, cell.Level, nearby);
+                    CollectRampLandings(surface, x, z, landings);
+                }
 
                 int firstTopVertex = vertices.Count;
-                BuildTop(sw, nw, ne, se, nearby, vertices, edgeMask, triangles[cell.IsRamp ? 2 : 0]);
+                BuildTop(sw, nw, ne, se, nearby, landings, vertices, edgeMask, triangles[cell.IsRamp ? 2 : 0]);
                 if (cell.IsRamp)
                     MarkRampJoins(surface, cell, x, z, firstTopVertex, rampJoinVertices);
 
                 // Each shared edge exactly once; west/south are only the outside perimeter.
-                Wall(surface, x, z, TerrainDirection.North, vertices, triangles);
-                Wall(surface, x, z, TerrainDirection.East, vertices, triangles);
-                if (z == 0) Wall(surface, x, z, TerrainDirection.South, vertices, triangles);
-                if (x == 0) Wall(surface, x, z, TerrainDirection.West, vertices, triangles);
-                // All cliff and rim vertices use full exposed earth when sampled by the top material.
-                while (edgeMask.Count < vertices.Count) edgeMask.Add(Vector2.right);
+                Wall(surface, x, z, TerrainDirection.North, vertices, triangles, edgeMask);
+                Wall(surface, x, z, TerrainDirection.East, vertices, triangles, edgeMask);
+                if (z == 0) Wall(surface, x, z, TerrainDirection.South, vertices, triangles, edgeMask);
+                if (x == 0) Wall(surface, x, z, TerrainDirection.West, vertices, triangles, edgeMask);
             }
             var mesh = new Mesh { name = "Terrain (generated)", hideFlags = HideFlags.DontSave,
                 indexFormat = vertices.Count > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16 };
@@ -176,7 +179,7 @@ namespace GameDev.RtsRpg
         }
 
         private static void Wall(TerrainSurface surface, int x, int z, TerrainDirection side,
-            List<Vector3> vertices, List<int>[] materials)
+            List<Vector3> vertices, List<int>[] materials, List<Vector2> edgeMask)
         {
             surface.GetEdge(x, z, side, out int a, out int b);
             Vector2Int step = TerrainSurface.Step(side);
@@ -241,6 +244,8 @@ namespace GameDev.RtsRpg
             upperA -= Vector3.up * lipA.Depth;
             upperB -= Vector3.up * lipB.Depth;
             // At shoulders the lower band narrows continuously into the ramp tip.
+            while (edgeMask.Count < vertices.Count) edgeMask.Add(Vector2.right);
+            int firstRockVertex = vertices.Count;
             Vector3 leftLip = Profile(u, 0.20f, 0.72f), rightLip = Profile(v, 0.25f, 0.83f);
             Vector3 leftBase = Profile(u, 0.72f, 1f), rightBase = Profile(v, 0.79f, 0.76f);
             Quad(upperA, upperB, rightLip, leftLip, outward, vertices, triangles);
@@ -248,6 +253,15 @@ namespace GameDev.RtsRpg
             Quad(leftBase, rightBase, lowerB, lowerA, outward, vertices, triangles);
             Quad(upperA, leftLip, leftBase, lowerA, outward, vertices, triangles);
             Quad(upperB, rightLip, rightBase, lowerB, outward, vertices, triangles);
+            for (int i = firstRockVertex; i < vertices.Count; i++)
+            {
+                Vector3 vertex = vertices[i];
+                float along = tangent.x != 0
+                    ? Mathf.InverseLerp(upperA.x, upperB.x, vertex.x)
+                    : Mathf.InverseLerp(upperA.z, upperB.z, vertex.z);
+                float underLip = Mathf.Lerp(upperA.y, upperB.y, along) - vertex.y;
+                edgeMask.Add(new Vector2(0f, 1f - Mathf.Clamp01(underLip / (surface.BlockWorldSize * 0.095f))));
+            }
         }
 
         private readonly struct RimCorner
@@ -281,7 +295,7 @@ namespace GameDev.RtsRpg
             float drop = (height - nextLower) * surface.HeightStepWorld * 0.25f;
             float cellSize = surface.BlockWorldSize * 0.25f;
             uint hash = DetailHash(vertex.x, vertex.y, vertex.x, vertex.y, surface.DetailSeed);
-            float width = Math.Min(cellSize * (0.065f + (hash & 255) * (0.045f / 255f)), RimReach(surface, drop));
+            float width = Math.Min(cellSize * (0.075f + (hash & 255) * (0.065f / 255f)), RimReach(surface, drop));
             float depth = Math.Min(cellSize * 0.065f, drop * 0.15f);
             bool convex = beside < height, concave = diagonal == height;
             // Adjacent concave strips share the diagonal end cut in the low
@@ -313,7 +327,7 @@ namespace GameDev.RtsRpg
                 if (i < 4)
                 {
                     float detail = ((hash >> (i * 7)) & 127) / 127f;
-                    float width = cell * (0.045f + detail * detail * 0.14f);
+                    float width = cell * (0.045f + detail * detail * 0.19f);
                     width = Math.Min(width, RimReach(surface, gap));
                     // Keep the first/last stations next to an inside corner
                     // far enough back that the strips meet only at their end cut.
@@ -424,10 +438,51 @@ namespace GameDev.RtsRpg
             }
         }
 
-        private static void BuildTop(Vector3 sw, Vector3 nw, Vector3 ne, Vector3 se, List<Vector4> nearby,
+        private static void CollectRampLandings(TerrainSurface surface, int x, int z, List<Vector4> landings)
+        {
+            // Include diagonal neighbors so the dirt fades around both ends of a landing.
+            for (int dz = -1; dz <= 1; dz++)
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                int nx = x + dx, nz = z + dz;
+                if (!surface.Contains(nx, nz) || surface.GetCell(nx, nz).IsRamp
+                    || surface.GetCell(nx, nz).Level != surface.GetCell(x, z).Level) continue;
+                for (int i = 0; i < 4; i++)
+                {
+                    var side = (TerrainDirection)i;
+                    var step = TerrainSurface.Step(side);
+                    int rx = nx + step.x, rz = nz + step.y;
+                    if (!surface.Contains(rx, rz)) continue;
+                    var ramp = surface.GetCell(rx, rz);
+                    if (!ramp.IsRamp || (ramp.Uphill != side && ramp.Uphill != TerrainSurface.Opposite(side))
+                        || surface.IsBoundaryBlocked(nx, nz, side)) continue;
+                    switch (side)
+                    {
+                        case TerrainDirection.North: landings.Add(new Vector4(dx, dz + 1, dx + 1, dz + 1)); break;
+                        case TerrainDirection.East: landings.Add(new Vector4(dx + 1, dz, dx + 1, dz + 1)); break;
+                        case TerrainDirection.South: landings.Add(new Vector4(dx, dz, dx + 1, dz)); break;
+                        case TerrainDirection.West: landings.Add(new Vector4(dx, dz, dx, dz + 1)); break;
+                    }
+                }
+            }
+        }
+
+        private static float EdgeInfluence(float u, float v, List<Vector4> edges)
+        {
+            float distanceSquared = 1f;
+            foreach (Vector4 edge in edges)
+            {
+                float dx = u - Mathf.Clamp(u, edge.x, edge.z);
+                float dz = v - Mathf.Clamp(v, edge.y, edge.w);
+                distanceSquared = Mathf.Min(distanceSquared, dx * dx + dz * dz);
+            }
+            return 1f - Mathf.Sqrt(distanceSquared);
+        }
+
+        private static void BuildTop(Vector3 sw, Vector3 nw, Vector3 ne, Vector3 se, List<Vector4> nearby, List<Vector4> landings,
             List<Vector3> vertices, List<Vector2> edgeMask, List<int> triangles)
         {
-            int divisions = nearby.Count == 0 ? 1 : 4;
+            int divisions = nearby.Count == 0 && landings.Count == 0 ? 1 : 4;
             int first = vertices.Count;
             int stride = divisions + 1;
             for (int z = 0; z <= divisions; z++)
@@ -435,14 +490,7 @@ namespace GameDev.RtsRpg
             {
                 float u = (float)x / divisions, v = (float)z / divisions;
                 vertices.Add(Vector3.Lerp(Vector3.Lerp(sw, se, u), Vector3.Lerp(nw, ne, u), v));
-                float distanceSquared = 1f;
-                foreach (Vector4 edge in nearby)
-                {
-                    float dx = u - Mathf.Clamp(u, edge.x, edge.z);
-                    float dz = v - Mathf.Clamp(v, edge.y, edge.w);
-                    distanceSquared = Mathf.Min(distanceSquared, dx * dx + dz * dz);
-                }
-                edgeMask.Add(new Vector2(1f - Mathf.Sqrt(distanceSquared), 0f));
+                edgeMask.Add(new Vector2(EdgeInfluence(u, v, nearby), EdgeInfluence(u, v, landings)));
                 if (x == divisions || z == divisions) continue;
                 int index = first + x + z * stride;
                 triangles.Add(index); triangles.Add(index + stride); triangles.Add(index + stride + 1);
