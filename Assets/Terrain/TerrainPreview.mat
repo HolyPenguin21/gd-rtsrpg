@@ -22,12 +22,20 @@ Material:
   m_LockedProperties:
   m_SavedProperties:
     serializedVersion: 3
-    m_TexEnvs: []
+    m_TexEnvs:
+    - _SurfaceMap:
+        m_Texture: {fileID: 2800000, guid: ec5969cc0fe54a209ba4858c060a3051, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _EarthMap:
+        m_Texture: {fileID: 2800000, guid: b62bb560d3684e149e79b2b2aba1d7ec, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _GrainScale: 6
-    - _Variation: 0.28
+    - _EdgeWidth: 0.64
+    - _SurfaceType: 0
+    - _TilesPerUnit: 0.25
     m_Colors:
-    - _BaseColor: {r: 0.27, g: 0.35, b: 0.17, a: 1}
-    - _AccentColor: {r: 0.38, g: 0.37, b: 0.23, a: 1}
+    - _Tint: {r: 1, g: 1, b: 1, a: 1}
   m_BuildTextureStacks: []
