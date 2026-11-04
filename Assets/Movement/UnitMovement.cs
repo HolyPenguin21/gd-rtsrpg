@@ -58,6 +58,22 @@ namespace GameDev.RtsRpg
         internal bool AtAnchor => !revisionHold && progress == 0f && !yieldTarget.HasValue && !retreating;
         internal bool HasRoute => (path != null && path.IsCurrent) || (pending != null && pending.IsCurrent);
         internal bool StopsAfterEdge => stopAfterEdge;
+        // A started edge (or a retreat) claims its remaining sweep until it
+        // finishes. Claims stop crossing/opposing commitments, not followers.
+        internal bool HasClaim => activeEdge && !revisionHold && (retreating || progress > 0f);
+        private Vector2 ClaimTarget => retreating ? Centre(restingPose) : Centre(edgeEnd);
+        internal Rect ClaimSweep => edgeAngle != 0f ? TurnSweep(centre, ClaimTarget) : TranslationSweep(centre, ClaimTarget, facing);
+        internal Vector2 ClaimDirection
+        {
+            get
+            {
+                Vector2 delta = ClaimTarget - centre;
+                return delta.sqrMagnitude > 0.000001f ? delta.normalized : Vector2.zero;
+            }
+        }
+        private Rect EndFootprint => BoundsAt(Centre(edgeEnd), edgeEnd.Yaw);
+        internal Rect ClaimEnd => retreating ? BoundsAt(Centre(restingPose), restingPose.Yaw) : EndFootprint;
+        internal bool ClaimsArea(Rect area) => HasClaim && Overlaps(ClaimSweep, area);
         internal bool RequiresCornerRecovery => cornerFailures > 0 && cornerRevision == grid.Revision
             && (restingPose.Cell - failedCorner.Cell).sqrMagnitude <= 4;
         internal bool CanLaunch => CanPlan && AtAnchor && !HasRoute && Time.time >= yieldUntil;
@@ -89,6 +105,15 @@ namespace GameDev.RtsRpg
         // survives edge completion so a dodge spanning several cells keeps one
         // side; it expires only after the threat has been absent for a while.
         private const float AvoidCommitSeconds = 0.6f;
+        private const float RetreatGiveUp = 0.6f, RetreatCooldown = 2f;
+        private float noRetreatUntil;
+        // Body found on this unit's committed sweep while it waits; null when moving.
+        private UnitMovement waitingOn;
+        internal int RetreatsAbandoned { get; private set; }
+        internal int Nudges { get; private set; }
+        // A nudge is a bounded escape; repeated nudges on one edge mean it is not working.
+        private const int MaxNudgesPerEdge = 12;
+        private int nudgesThisEdge;
         private int avoidSide;
         private float avoidUntil;
 
@@ -589,13 +614,20 @@ namespace GameDev.RtsRpg
                 {
                     if (steeringHold == Hold.None) { speed = 0f; return; }
                     Wait(steeringHold, dt);
-                    if (steeringHold == Hold.Traffic && wait >= 0.15f && !retreating)
-                        Blocker(TranslationSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), facing))
-                            ?.YieldForFriendly(end - centre, this);
-                    if (!revisionRecovery && wait >= 0.85f && !retreating) RecoverBlockedEdge();
-                    else if (!revisionRecovery && retreating && wait >= 1.7f && grid.CanSweep(centre, end, HalfExtent(facing))
-                        && Blocker(TranslationSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), facing)) == null)
-                        retreating = false;
+                    var ahead = steeringHold == Hold.Traffic && !retreating
+                        ? Blocker(TranslationSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), facing)) : null;
+                    waitingOn = ahead;
+                    if (ahead != null && wait >= 0.15f) ahead.YieldForFriendly(end - centre, this);
+                    if (ahead != null && !revisionRecovery && TryResolveMutual(ahead, dt)) return;
+                    // A predicted contact with no body on the sweep, or an ally
+                    // flowing the same way, is a queue: wait instead of backing off.
+                    if (!revisionRecovery && wait >= 0.85f && !retreating
+                        && (steeringHold != Hold.Traffic || (ahead != null && ShouldBackOff(ahead, end))))
+                        RecoverBlockedEdge();
+                    else if (!revisionRecovery && retreating && (wait >= RetreatGiveUp || (wait >= 1.7f
+                        && grid.CanSweep(centre, end, HalfExtent(facing))
+                        && Blocker(TranslationSweep(centre, Vector2.MoveTowards(centre, end, 0.35f), facing)) == null)))
+                        AbandonRetreat();
                     return;
                 }
                 proposed = steeringPoint;
@@ -628,20 +660,24 @@ namespace GameDev.RtsRpg
             Rect sweep = edgeAngle == 0f ? TranslationSweep(centre, proposed, facing)
                 : revisionRecovery ? TurnSlice(progress, proposedProgress) : EdgeSweep(edgeStart, end);
             var obstruction = Blocker(sweep);
+            // The first step of an edge also requires an unclaimed end footprint.
+            if (obstruction == null && progress == 0f && !retreating && !revisionRecovery)
+                obstruction = navigation.FindClaimConflict(this, ClaimSweep, ClaimDirection, EndFootprint, Occupancy);
             if (obstruction != null)
             {
                 // Prediction accepted this step but the live occupancy check
                 // rejected it at commit time.
                 ClearanceRejects++;
+                waitingOn = obstruction;
                 if (obstruction.Team == Team && wait >= 0.15f && !retreating)
                     obstruction.YieldForFriendly(end - centre, this);
                 Wait(obstruction.Team == Team ? Hold.Traffic : Hold.Enemy, dt);
-                if (!revisionRecovery && wait >= 0.85f && !retreating)
-                {
+                if (!revisionRecovery && !retreating && TryResolveMutual(obstruction, dt)) return;
+                if (!revisionRecovery && wait >= 0.85f && !retreating && ShouldBackOff(obstruction, end))
                     RecoverBlockedEdge();
-                }
-                else if (!revisionRecovery && retreating && wait >= 1.7f && Blocker(EdgeSweep(centre, end)) == null)
-                    retreating = false;
+                else if (!revisionRecovery && retreating
+                    && (wait >= RetreatGiveUp || (wait >= 1.7f && Blocker(EdgeSweep(centre, end)) == null)))
+                    AbandonRetreat();
                 return;
             }
 
@@ -668,6 +704,7 @@ namespace GameDev.RtsRpg
             facing = proposedYaw;
             progress = proposedProgress;
             wait = passageWaitRun = 0f;
+            waitingOn = null;
             if (edgeAngle == 0f)
             {
                 var direction = (end - edgeStart).normalized;
@@ -700,10 +737,107 @@ namespace GameDev.RtsRpg
             }
             else
             {
+                // After an abandoned retreat, hold the current pose for a while
+                // instead of immediately backing into the same occupied space.
+                if (EnemyContact == null && Time.fixedTime < noRetreatUntil) return;
                 retreating = true;
+                wait = 0f;
                 if (edgeAngle == 0f && edgeTrail.Count > 1 && (centre - edgeTrail[edgeTrail.Count - 1]).sqrMagnitude < 0.00000001f)
                     edgeTrail.RemoveAt(edgeTrail.Count - 1);
             }
+        }
+
+        // Backing off frees space only when the blocker cannot advance while
+        // we stand here: an enemy, a stationary ally, or an ally whose own
+        // edge points at us (head-on). An ally queued or moving the same way
+        // will clear by itself; retreating into the unit behind only spreads
+        // the jam (Issue #20 D1: half of a 100-unit army ended permanently
+        // retreating, which also blocked planning and new orders).
+        private bool ShouldBackOff(UnitMovement blocker, Vector2 end)
+        {
+            if (blocker.Team != Team) return true;
+            if (!blocker.activeEdge) return !blocker.HasRoute;
+            // Mutual wait (typically crossing paths): exactly one side gives way.
+            if (blocker.waitingOn == this) return YieldsTo(blocker);
+            Vector2 ours = end - centre;
+            Vector2 theirs = blocker.Centre(blocker.edgeEnd) - blocker.centre;
+            return Vector2.Dot(ours, theirs) < 0f && Vector2.Dot(theirs, centre - blocker.centre) > 0f;
+        }
+
+        // In a mutual allied wait the yielding side slides clear first. If it
+        // could not (its retreat was abandoned), the other side tries instead.
+        private bool TryResolveMutual(UnitMovement blocker, float dt) =>
+            blocker.Team == Team && blocker.waitingOn == this && wait >= 0.2f
+            && (YieldsTo(blocker) || Time.fixedTime < blocker.noRetreatUntil) && TryNudge(blocker, dt);
+
+        // Mutual waits between crossing bodies usually overlap by a small
+        // margin across the other unit's motion. The yielding unit slides out
+        // of the other's next sweep along that axis: a short, speed-limited,
+        // geometry- and occupancy-checked special maneuver (not a normal move).
+        private bool TryNudge(UnitMovement other, float dt)
+        {
+            // Only mid-edge: at an anchor the pose must stay exactly on the grid.
+            if (edgeAngle != 0f || progress <= 0f || retreating || revisionRecovery || !other.activeEdge) return false;
+            Vector2 theirEnd = other.Centre(other.edgeEnd);
+            Vector2 theirDirection = theirEnd - other.centre;
+            if (theirDirection.sqrMagnitude < 0.0001f) return false;
+            if (nudgesThisEdge >= MaxNudgesPerEdge) return false;
+            Rect theirs = other.TranslationSweep(other.centre, Vector2.MoveTowards(other.centre, theirEnd, 0.35f), other.facing);
+            // Their end footprint too: a small intrusion there stops their final snap.
+            theirs = Union(theirs, other.EndFootprint);
+            Rect mine = Occupancy;
+            // Separate along whichever axis needs the smaller feasible shift.
+            float shiftX = mine.center.x >= theirs.center.x ? theirs.xMax - mine.xMin : theirs.xMin - mine.xMax;
+            float shiftZ = mine.center.y >= theirs.center.y ? theirs.yMax - mine.yMin : theirs.yMin - mine.yMax;
+            bool alongX = Mathf.Abs(shiftX) <= Mathf.Abs(shiftZ);
+            for (int attempt = 0; attempt < 2; attempt++, alongX = !alongX)
+            {
+                float shift = alongX ? shiftX : shiftZ;
+                if (Mathf.Abs(shift) < 0.0001f || Mathf.Abs(shift) > 0.6f) continue;
+                float step = Mathf.Min(Mathf.Abs(shift) + 0.02f, 2f / cellSize * dt) * Mathf.Sign(shift);
+                Vector2 candidate = centre + (alongX ? new Vector2(step, 0f) : new Vector2(0f, step));
+                Rect candidateSweep = TranslationSweep(centre, candidate, facing);
+                if (!grid.CanSweep(centre, candidate, HalfExtent(facing)) || Blocker(candidateSweep) != null
+                    || (passage != null && !grid.CanSteerAcrossPassage(candidateSweep, Occupancy, passage))) continue;
+                ApplyNudge(candidate, dt);
+                return true;
+            }
+            return false;
+        }
+
+        private void ApplyNudge(Vector2 target, float dt)
+        {
+            velocity = (target - centre) / dt;
+            MotionTicks++;
+            Nudges++;
+            nudgesThisEdge++;
+            edgeTrail.Add(target);
+            centre = target;
+            UpdateOccupancy(BoundsAt(centre, facing));
+            navigation.Register(this, centre);
+            State = Motion.Yielding;
+        }
+
+        // Deterministic, antisymmetric choice for a mutually blocked pair:
+        // the unit less committed to its current edge backs off; equal
+        // progress falls back to a per-pair hash, not to spawn order.
+        private bool YieldsTo(UnitMovement other)
+        {
+            if (Mathf.Abs(progress - other.progress) > 0.05f) return progress < other.progress;
+            int pair = unchecked(Math.Min(Serial, other.Serial) * 73856093 ^ Math.Max(Serial, other.Serial) * 19349663);
+            int mine = unchecked((Serial ^ pair) * -1640531535), theirs = unchecked((other.Serial ^ pair) * -1640531535);
+            return mine != theirs ? mine < theirs : Serial < other.Serial;
+        }
+
+        // A retreat is a bounded attempt. If its own path is occupied, give
+        // it up: keep the actual pose, stay plannable and orderable, and let
+        // traffic or a new route resolve the conflict.
+        private void AbandonRetreat()
+        {
+            retreating = false;
+            wait = 0f;
+            noRetreatUntil = Time.fixedTime + RetreatCooldown;
+            RetreatsAbandoned++;
         }
 
         private void RecordCornerFailure(NavigationPose destination)
@@ -902,6 +1036,7 @@ namespace GameDev.RtsRpg
             edgeStart = centre;
             edgeTrail.Clear();
             edgeTrail.Add(centre);
+            nudgesThisEdge = 0;
             edgeYaw = facing;
             edgeAngle = Mathf.DeltaAngle(facing, to.Yaw);
             edgeIndex = index;
@@ -953,6 +1088,7 @@ namespace GameDev.RtsRpg
             path = null;
             provisional = false;
             yieldTarget = mountedStep = null;
+            waitingOn = null;
             State = Motion.RepathPending;
         }
 

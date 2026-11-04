@@ -248,6 +248,35 @@ namespace GameDev.RtsRpg
             return null;
         }
 
+        // One-edge temporal reservation. A unit may start an edge only if its
+        // end footprint is not claimed by another started edge, its sweep does
+        // not oppose another started edge's remaining sweep, its end is not
+        // occupied by a body that is not leaving, and it is not a swap (the
+        // occupant's claim covers the requester's body). Following and
+        // crossing behind a claimed end stay allowed; the live per-step check
+        // still prevents contact. Without this, two units commit into each
+        // other and both deadlock mid-edge (measured: Issue #20 D1).
+        internal UnitMovement FindClaimConflict(UnitMovement requester, Rect sweep, Vector2 direction, Rect end, Rect body)
+        {
+            using var marker = ContactMarker.Auto();
+            const float margin = 5.5f;
+            var min = BucketAt(end.xMin - margin, end.yMin - margin);
+            var max = BucketAt(end.xMax + margin, end.yMax + margin);
+            for (int z = min.y; z <= max.y; z++)
+            for (int x = min.x; x <= max.x; x++)
+                if (traffic.TryGetValue(new Vector2Int(x, z), out var bucket))
+                    foreach (var other in bucket)
+                    {
+                        if (other == requester || !requester.SharesGrid(other)) continue;
+                        if (other.HasClaim && (UnitMovement.Overlaps(other.ClaimEnd, end)
+                            || (other.ClaimsArea(sweep) && Vector2.Dot(other.ClaimDirection, direction) < -0.3f)))
+                            return other;
+                        if (UnitMovement.Overlaps(end, other.Occupancy) && (!other.HasClaim || other.ClaimsArea(body)))
+                            return other;
+                    }
+            return null;
+        }
+
         private static Rect PredictedArea(UnitMovement unit, float horizon)
         {
             var area = unit.Occupancy;
