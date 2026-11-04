@@ -167,6 +167,8 @@ namespace GameDev.RtsRpg
             private int Index(Vector2Int cell) =>
                 cell.x - target.x + radius + (cell.y - target.y + radius) * (radius * 2 + 1);
 
+            internal int Radius => radius;
+
             internal bool Contains(Vector2Int cell) => Math.Abs(cell.x - target.x) <= radius
                 && Math.Abs(cell.y - target.y) <= radius && visited[Index(cell)];
 
@@ -221,12 +223,17 @@ namespace GameDev.RtsRpg
             NavigationFacing preferred = NavigationFacing.North)
         {
             int orientations = footprint.Orientations;
-            int rank = cursor % orientations;
+            Vector2Int cell = area[cursor / orientations];
+            int rank = cursor++ % orientations;
+            return TryCandidate(footprint, cell, rank, reserved, ownSlot, preferred, out pose);
+        }
+
+        internal bool TryCandidate(NavigationFootprint footprint, Vector2Int cell, int rank,
+            HashSet<Vector2Int> reserved, NavigationPose? ownSlot, NavigationFacing preferred, out NavigationPose pose)
+        {
             int facing = footprint.NeedsTurns ? ((int)preferred + rank * 2 + rank / 4) & 7 : 0;
-            pose = new NavigationPose(area[cursor / orientations], (NavigationFacing)facing);
-            cursor++;
-            if (!grid.CanOccupy(pose, footprint)) return false;
-            return CanReserve(pose, footprint, reserved, ownSlot);
+            pose = new NavigationPose(cell, (NavigationFacing)facing);
+            return grid.CanOccupy(pose, footprint) && CanReserve(pose, footprint, reserved, ownSlot);
         }
 
         internal static bool CanReserve(NavigationPose p, NavigationFootprint f, HashSet<Vector2Int> reserved,

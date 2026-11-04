@@ -207,6 +207,122 @@ namespace GameDev.RtsRpg
             return true;
         }
 
+        // Use the same blocker counts and blocked cell edges for continuous
+        // segments as for graph edges. Short pieces keep the swept rectangle tight.
+        internal bool CanSweep(Vector2 from, Vector2 to, Vector2 halfExtent)
+        {
+            if (!IsAlive) return false;
+            int pieces = Mathf.Max(1, Mathf.CeilToInt(Mathf.Max(Mathf.Abs(to.x - from.x), Mathf.Abs(to.y - from.y)) * 4f));
+            Vector2 previous = from;
+            bool checkBlockers = blockers.Count != 0;
+            const float epsilon = 0.00001f;
+            for (int i = 1; i <= pieces; i++)
+            {
+                Vector2 current = Vector2.Lerp(from, to, (float)i / pieces);
+                int x = Mathf.FloorToInt(Mathf.Min(previous.x, current.x) - halfExtent.x + epsilon);
+                int z = Mathf.FloorToInt(Mathf.Min(previous.y, current.y) - halfExtent.y + epsilon);
+                int endX = Mathf.CeilToInt(Mathf.Max(previous.x, current.x) + halfExtent.x - epsilon);
+                int endZ = Mathf.CeilToInt(Mathf.Max(previous.y, current.y) + halfExtent.y - epsilon);
+                if (!ClearRectangle(x, z, endX - x, endZ - z, checkBlockers)) return false;
+                previous = current;
+            }
+            return true;
+        }
+
+        internal bool NearBoundary(NavigationPose pose, NavigationFootprint footprint)
+        {
+            var size = footprint.Size(pose.Facing);
+            return !ClearRectangle(pose.Cell.x - 1, pose.Cell.y - 1, size.x + 2, size.y + 2, blockers.Count != 0);
+        }
+
+        internal int EdgeCost(NavigationPose from, NavigationPose to, NavigationFootprint footprint, int edge)
+        {
+            int cost = NavigationPathfinder.EdgeCost(edge);
+            if (edge >= 8)
+            {
+                var at = from.Centre(footprint);
+                return cost + (Surface.GetCell((int)at.x, (int)at.y).IsRamp ? 15 : 2);
+            }
+            // A soft terrain-only cost. Narrow routes remain reachable.
+            int x = to.Cell.x, z = to.Cell.y;
+            int index = x + z * Surface.CellsX;
+            return cost + ((cliffs[index] != 0 || x == 0 || z == 0
+                || (cliffs[index - 1] & 1) != 0 || (cliffs[index - Surface.CellsX] & 2) != 0) ? 2 : 0);
+        }
+
+        // A straight band whose open cross-section stays at most three cells.
+        // Opening into a bay, a flare or an intersection ends the band.
+        internal bool TryPassage(NavigationPose from, NavigationPose to, NavigationFootprint footprint,
+            out RectInt area, out int direction, out int bodyWidth)
+        {
+            Vector2Int delta = to.Cell - from.Cell;
+            area = default;
+            direction = bodyWidth = 0;
+            if (Math.Abs(delta.x) > 1 || Math.Abs(delta.y) > 1 || delta == Vector2Int.zero) return false;
+            var size = footprint.Size(to.Facing);
+            RectInt xLane = default, zLane = default;
+            bool x = delta.x != 0 && FindPassage(to.Cell, size, delta.x, true, out xLane);
+            bool z = delta.y != 0 && FindPassage(to.Cell, size, delta.y, false, out zLane);
+            if (!x && !z) return false;
+            if (x && (!z || xLane.width >= zLane.height))
+            {
+                area = xLane;
+                direction = delta.x;
+                bodyWidth = size.y;
+            }
+            else
+            {
+                area = zLane;
+                direction = delta.y * 2;
+                bodyWidth = size.x;
+            }
+            return true;
+        }
+
+        private bool FindPassage(Vector2Int to, Vector2Int size, int direction, bool alongX, out RectInt area)
+        {
+            area = default;
+            int cross = alongX ? to.y : to.x;
+            int position = alongX ? to.x : to.y;
+            if (direction > 0) position += (alongX ? size.x : size.y) - 1;
+            if (!CrossSection(position, cross, alongX, out int first, out int width)) return false;
+            int min = position, max = position;
+            // Only narrow cells populate this cache. The same span is returned
+            // from both ends, and revision changes discard its topology.
+            if (passageRevision != Revision) { passages.Clear(); passageRevision = Revision; }
+            var key = new Vector3Int(position, first, alongX ? 1 : 0);
+            if (passages.TryGetValue(key, out area)) return true;
+
+            while (Adjacent(min, min - 1)) min--;
+            while (Adjacent(max, max + 1)) max++;
+            area = alongX ? new RectInt(min, first, max - min + 1, width)
+                : new RectInt(first, min, width, max - min + 1);
+            for (int i = min; i <= max; i++) passages[new Vector3Int(i, first, alongX ? 1 : 0)] = area;
+            return true;
+
+            bool Adjacent(int a, int b) => CrossSection(b, first, alongX, out int start, out int span)
+                && start == first && span == width && (alongX
+                    ? ClearRectangle(Math.Min(a, b), first, 2, width, blockers.Count != 0)
+                    : ClearRectangle(first, Math.Min(a, b), width, 2, blockers.Count != 0));
+        }
+
+        private int passageRevision;
+        private readonly Dictionary<Vector3Int, RectInt> passages = new();
+
+        private bool CrossSection(int position, int cross, bool alongX, out int first, out int width)
+        {
+            first = cross;
+            width = 1;
+            if (!Clear(cross, 1)) return false;
+            while (width < 4 && Clear(first - 1, width + 1)) { first--; width++; }
+            while (width < 4 && Clear(first, width + 1)) width++;
+            return width < 4;
+
+            bool Clear(int start, int span) => alongX
+                ? ClearRectangle(position, start, 1, span, blockers.Count != 0)
+                : ClearRectangle(start, position, span, 1, blockers.Count != 0);
+        }
+
         public bool CanStep(NavigationPose from, NavigationPose to, NavigationFootprint footprint)
         {
             using var marker = StepMarker.Auto();
